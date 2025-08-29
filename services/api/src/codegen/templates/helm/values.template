@@ -1,0 +1,56 @@
+# Default values for {{projectName}}.
+
+replicaCount: 1
+
+image:
+  repository: {{projectName}}-api
+  pullPolicy: IfNotPresent
+  tag: "latest"
+
+service:
+  type: ClusterIP
+  port: {{port}}
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: {{projectName}}.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+config:
+  database:
+    host: postgres
+    port: 5432
+    name: {{projectName}}
+  redis:
+    host: redis
+    port: 6379
+  jwt:
+    secret: ""  # Set via secret
+  environment: production
+
+postgres:
+  enabled: true
+  postgresqlUsername: {{projectName}}
+  postgresqlDatabase: {{projectName}}
+
+redis:
+  enabled: true
+
+prometheus:
+  enabled: true
+  serviceMonitor:
+    enabled: true

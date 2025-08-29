@@ -1,0 +1,360 @@
+# {{projectName}}
+
+[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Node.js Version](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen)](https://nodejs.org/)
+[![Docker](https://img.shields.io/badge/docker-%E2%9C%93-blue)](https://www.docker.com/)
+[![Kubernetes](https://img.shields.io/badge/kubernetes-%E2%9C%93-blue)](https://kubernetes.io/)
+
+{{description}}
+
+## 🚀 Quick Start
+
+Get {{projectName}} up and running in minutes!
+
+### Prerequisites
+
+- Node.js 18+ and npm
+- Docker and Docker Compose (for local development)
+- kubectl and Helm (for Kubernetes deployment)
+
+### Local Development
+
+1. **Clone and install dependencies**
+   ```bash
+   git clone <repository-url>
+   cd {{projectName}}
+   npm install
+   ```
+
+2. **Configure environment**
+   ```bash
+   cp .env.example .env
+   # Edit .env with your configuration
+   ```
+
+3. **Start development environment**
+   ```bash
+   # Start all services (API, database, Redis)
+   docker-compose up -d
+
+   # Start the application in development mode
+   npm run dev
+   ```
+
+4. **Access the application**
+   - API: http://localhost:{{port}}
+   - API Documentation: http://localhost:{{port}}/docs
+   - Health Check: http://localhost:{{port}}/health
+
+### Production Deployment
+
+#### Docker Deployment
+
+```bash
+# Build and run with Docker
+docker build -t {{projectName}} .
+docker run -p {{port}}:{{port}} --env-file .env {{projectName}}
+```
+
+#### Kubernetes Deployment
+
+```bash
+# Install with Helm
+helm install {{projectName}} ./helm
+
+# Or upgrade existing installation
+helm upgrade {{projectName}} ./helm
+```
+
+## 📋 Table of Contents
+
+- [Features](#features)
+- [Architecture](#architecture)
+- [Configuration](#configuration)
+- [API Documentation](#api-documentation)
+- [Development](#development)
+- [Testing](#testing)
+- [Deployment](#deployment)
+- [Monitoring](#monitoring)
+- [Contributing](#contributing)
+- [License](#license)
+
+## ✨ Features
+
+- **🔐 Authentication & Authorization** - JWT-based auth with role-based access control
+- **📊 Comprehensive Logging** - Structured logging with correlation IDs
+- **🔄 Error Handling** - Robust error handling with proper HTTP status codes
+- **⚡ Performance** - Optimized for high-throughput scenarios
+- **🔒 Security** - Security headers, input validation, rate limiting
+- **📈 Monitoring** - Health checks, metrics, and observability
+- **🐳 Container Ready** - Docker and Kubernetes deployment support
+- **📚 API Documentation** - Auto-generated Swagger/OpenAPI docs
+- **🧪 Testing** - Comprehensive test suites with CI/CD integration
+
+## 🏗️ Architecture
+
+```
+{{projectName}}/
+├── src/
+│   ├── modules/          # Feature modules
+│   ├── common/           # Shared utilities
+│   ├── config/           # Configuration
+│   └── main.ts           # Application entry point
+├── helm/                 # Kubernetes manifests
+├── ops/                  # Operational configurations
+├── tests/               # Test suites
+└── docs/                # Documentation
+```
+
+### Key Components
+
+- **API Gateway** - RESTful API with validation and error handling
+- **Authentication Service** - JWT token management and user authentication
+- **Database Layer** - PostgreSQL with optimized queries and migrations
+- **Caching Layer** - Redis for session management and data caching
+- **Monitoring Stack** - Prometheus metrics and Grafana dashboards
+
+## ⚙️ Configuration
+
+### Environment Variables
+
+| Variable | Description | Default | Required |
+|----------|-------------|---------|----------|
+| `NODE_ENV` | Environment mode | `development` | No |
+| `PORT` | Server port | `{{port}}` | No |
+| `DATABASE_URL` | PostgreSQL connection URL | - | Yes |
+| `REDIS_URL` | Redis connection URL | - | Yes |
+| `JWT_SECRET` | JWT signing secret | - | Yes |
+| `API_BASE_URL` | Base URL for API | - | No |
+
+### Configuration Files
+
+- `.env` - Environment-specific configuration
+- `config/default.json` - Default configuration
+- `config/production.json` - Production overrides
+
+## 📖 API Documentation
+
+### Swagger UI
+Access the interactive API documentation at:
+```
+http://localhost:{{port}}/docs
+```
+
+### OpenAPI Specification
+Download the OpenAPI spec:
+```
+http://localhost:{{port}}/docs-json
+```
+
+### Key Endpoints
+
+- `GET /health` - Health check endpoint
+- `POST /auth/login` - User authentication
+- `GET /users` - List users (authenticated)
+- `POST /users` - Create user (admin only)
+
+## 🛠️ Development
+
+### Development Setup
+
+1. **Install dependencies**
+   ```bash
+   npm install
+   ```
+
+2. **Start development database**
+   ```bash
+   docker-compose up postgres redis -d
+   ```
+
+3. **Run database migrations**
+   ```bash
+   npm run migration:run
+   ```
+
+4. **Start development server**
+   ```bash
+   npm run dev
+   ```
+
+### Available Scripts
+
+| Script | Description |
+|--------|-------------|
+| `npm run dev` | Start development server with hot reload |
+| `npm run build` | Build production bundle |
+| `npm run start` | Start production server |
+| `npm run test` | Run test suite |
+| `npm run test:cov` | Run tests with coverage |
+| `npm run lint` | Run ESLint |
+| `npm run format` | Format code with Prettier |
+
+### Code Structure
+
+```
+src/
+├── auth/                 # Authentication & authorization
+├── users/                # User management
+├── common/               # Shared utilities
+│   ├── decorators/       # Custom decorators
+│   ├── guards/          # Route guards
+│   ├── interceptors/    # Request/response interceptors
+│   └── filters/         # Exception filters
+├── config/               # Configuration management
+└── database/            # Database configuration
+```
+
+## 🧪 Testing
+
+### Running Tests
+
+```bash
+# Run all tests
+npm run test
+
+# Run with coverage
+npm run test:cov
+
+# Run specific test suite
+npm run test -- --grep "authentication"
+
+# Run e2e tests
+npm run test:e2e
+```
+
+### Test Structure
+
+```
+tests/
+├── unit/                 # Unit tests
+├── integration/         # Integration tests
+└── e2e/                 # End-to-end tests
+```
+
+### Test Coverage
+
+Aim for >80% code coverage across all modules.
+
+## 🚀 Deployment
+
+### Docker Deployment
+
+1. **Build image**
+   ```bash
+   docker build -t {{projectName}}:latest .
+   ```
+
+2. **Run container**
+   ```bash
+   docker run -p {{port}}:{{port}} --env-file .env {{projectName}}:latest
+   ```
+
+### Kubernetes Deployment
+
+1. **Install with Helm**
+   ```bash
+   helm install {{projectName}} ./helm
+   ```
+
+2. **Upgrade deployment**
+   ```bash
+   helm upgrade {{projectName}} ./helm
+   ```
+
+3. **Check status**
+   ```bash
+   kubectl get pods -l app.kubernetes.io/name={{projectName}}
+   ```
+
+### CI/CD Pipeline
+
+The project includes GitHub Actions workflows for:
+
+- Automated testing on pull requests
+- Docker image building and publishing
+- Kubernetes deployment to staging/production
+- Security scanning and vulnerability checks
+
+## 📊 Monitoring
+
+### Health Checks
+
+- **Application Health**: `GET /health`
+- **Database Health**: `GET /health/database`
+- **Redis Health**: `GET /health/redis`
+
+### Metrics
+
+The application exposes Prometheus metrics at `/metrics`:
+
+- HTTP request/response metrics
+- Database connection pool stats
+- Error rates and latency histograms
+- Custom business metrics
+
+### Logging
+
+Structured logging with correlation IDs:
+
+```json
+{
+  "level": "info",
+  "message": "User authenticated",
+  "userId": "123",
+  "correlationId": "abc-123",
+  "timestamp": "2024-01-01T00:00:00.000Z"
+}
+```
+
+### Dashboards
+
+Grafana dashboards are included in `ops/grafana/` for:
+
+- API performance monitoring
+- Error tracking
+- Database performance
+- System resource usage
+
+## 🤝 Contributing
+
+We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) for details.
+
+### Development Workflow
+
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Add tests for new functionality
+5. Ensure all tests pass
+6. Submit a pull request
+
+### Code Standards
+
+- **Linting**: ESLint with TypeScript rules
+- **Formatting**: Prettier with consistent styling
+- **Testing**: Jest with >80% coverage requirement
+- **Documentation**: JSDoc for all public APIs
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## 🆘 Support
+
+- **Issues**: [GitHub Issues](https://github.com/your-org/{{projectName}}/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/your-org/{{projectName}}/discussions)
+- **Documentation**: [Wiki](https://github.com/your-org/{{projectName}}/wiki)
+
+## 🙏 Acknowledgments
+
+- Built with [NestJS](https://nestjs.com/)
+- Database: [PostgreSQL](https://postgresql.org/)
+- Caching: [Redis](https://redis.io/)
+- Container: [Docker](https://docker.com/)
+- Orchestration: [Kubernetes](https://kubernetes.io/)
+
+---
+
+**Generated by [AI API Integrator](https://github.com/ai-api-integrator)**
+*Last updated: {{timestamp}}*

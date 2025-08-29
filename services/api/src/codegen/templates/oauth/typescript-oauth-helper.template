@@ -1,0 +1,358 @@
+// OAuth Helper for {{entityName}} API
+import { OAuthProvisioningService, OAuthAppConfig, OAuthTokenResponse } from './oauth-provisioning';
+import { VaultSecretsService } from './vault-secrets';
+
+export interface OAuthHelperConfig {
+  vault: {
+    address: string;
+    token?: string;
+    roleId?: string;
+    secretId?: string;
+  };
+  providers: Record<string, OAuthAppConfig>;
+}
+
+export interface OAuthFlowOptions {
+  provider: string;
+  scopes?: string[];
+  redirectUri?: string;
+  state?: string;
+}
+
+export interface OAuthTokens {
+  accessToken: string;
+  refreshToken?: string;
+  tokenType: string;
+  expiresAt?: Date;
+  scope?: string;
+}
+
+export class OAuthHelper {
+  private provisioningService: OAuthProvisioningService;
+  private vaultService: VaultSecretsService;
+  private config: OAuthHelperConfig;
+
+  constructor(config: OAuthHelperConfig) {
+    this.config = config;
+    this.provisioningService = new OAuthProvisioningService();
+    this.vaultService = new VaultSecretsService();
+  }
+
+  /**
+   * Initialize the OAuth helper
+   */
+  async initialize(): Promise<void> {
+    await this.vaultService.initialize();
+
+    // Provision OAuth apps for configured providers
+    for (const [provider, appConfig] of Object.entries(this.config.providers)) {
+      await this.provisionOAuthApp(provider, appConfig);
+    }
+  }
+
+  /**
+   * Provision an OAuth application
+   */
+  private async provisionOAuthApp(provider: string, config: OAuthAppConfig): Promise<void> {
+    try {
+      const app = await this.provisioningService.provisionOAuthApp('default-project', config);
+
+      // Store secrets in Vault
+      await this.vaultService.storeOAuthSecrets('default-project', provider, {
+        clientId: config.clientId,
+        clientSecret: config.clientSecret,
+        redirectUri: config.redirectUri,
+        additionalSecrets: {
+          scopes: config.scopes.join(' '),
+          provider_config: JSON.stringify(config.additionalParams || {}),
+        },
+      });
+
+      console.log(`Provisioned OAuth app for ${provider}`);
+    } catch (error) {
+      console.error(`Failed to provision OAuth app for ${provider}:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Generate OAuth authorization URL
+   */
+  generateAuthorizationUrl(options: OAuthFlowOptions): { authorizationUrl: string; state: string } {
+    // TODO: Get app ID from storage
+    const appId = `oauth_${options.provider}`;
+
+    return this.provisioningService.generateAuthorizationUrl(
+      appId,
+      options.redirectUri || 'http://localhost:3000/oauth/callback',
+      options.scopes,
+      options.state
+    );
+  }
+
+  /**
+   * Handle OAuth callback and exchange code for tokens
+   */
+  async handleCallback(
+    state: string,
+    code: string,
+    redirectUri?: string
+  ): Promise<OAuthTokens> {
+    const tokenResponse = await this.provisioningService.exchangeCodeForToken(
+      state,
+      code,
+      redirectUri || 'http://localhost:3000/oauth/callback'
+    );
+
+    // Store tokens securely
+    const tokens: OAuthTokens = {
+      accessToken: tokenResponse.accessToken,
+      refreshToken: tokenResponse.refreshToken,
+      tokenType: tokenResponse.tokenType,
+      scope: tokenResponse.scope,
+    };
+
+    if (tokenResponse.expiresIn) {
+      tokens.expiresAt = new Date(Date.now() + tokenResponse.expiresIn * 1000);
+    }
+
+    return tokens;
+  }
+
+  /**
+   * Refresh OAuth tokens
+   */
+  async refreshTokens(refreshToken: string, provider: string): Promise<OAuthTokens> {
+    const appId = `oauth_${provider}`;
+
+    const tokenResponse = await this.provisioningService.refreshAccessToken(refreshToken, appId);
+
+    const tokens: OAuthTokens = {
+      accessToken: tokenResponse.accessToken,
+      refreshToken: tokenResponse.refreshToken,
+      tokenType: tokenResponse.tokenType,
+      scope: tokenResponse.scope,
+    };
+
+    if (tokenResponse.expiresIn) {
+      tokens.expiresAt = new Date(Date.now() + tokenResponse.expiresIn * 1000);
+    }
+
+    return tokens;
+  }
+
+  /**
+   * Get stored OAuth secrets
+   */
+  async getOAuthSecrets(provider: string): Promise<any> {
+    return await this.vaultService.getOAuthSecrets('default-project', provider);
+  }
+
+  /**
+   * Store API key in Vault
+   */
+  async storeAPIKey(apiName: string, apiKey: string): Promise<void> {
+    await this.vaultService.storeAPIKey('default-project', apiName, apiKey, {
+      stored_at: new Date().toISOString(),
+      provider: 'manual',
+    });
+  }
+
+  /**
+   * Retrieve API key from Vault
+   */
+  async getAPIKey(apiName: string): Promise<string | null> {
+    return await this.vaultService.getAPIKey('default-project', apiName);
+  }
+
+  /**
+   * Store database credentials in Vault
+   */
+  async storeDatabaseCredentials(
+    databaseName: string,
+    credentials: {
+      username: string;
+      password: string;
+      host: string;
+      port?: number;
+      database?: string;
+    }
+  ): Promise<void> {
+    await this.vaultService.storeDatabaseCredentials('default-project', databaseName, credentials);
+  }
+
+  /**
+   * Get database credentials from Vault
+   */
+  async getDatabaseCredentials(databaseName: string): Promise<any> {
+    return await this.vaultService.getDatabaseCredentials('default-project', databaseName);
+  }
+
+  /**
+   * Store webhook secret in Vault
+   */
+  async storeWebhookSecret(webhookId: string, secret: string): Promise<void> {
+    await this.vaultService.storeWebhookSecret('default-project', webhookId, secret);
+  }
+
+  /**
+   * Get webhook secret from Vault
+   */
+  async getWebhookSecret(webhookId: string): Promise<string | null> {
+    return await this.vaultService.getWebhookSecret('default-project', webhookId);
+  }
+
+  /**
+   * Create project encryption keys
+   */
+  async createProjectKeys(): Promise<{ encryptionKey: string; signingKey: string }> {
+    return await this.vaultService.createProjectKeys('default-project');
+  }
+
+  /**
+   * Get project encryption keys
+   */
+  async getProjectKeys(): Promise<{ encryptionKey: string; signingKey: string } | null> {
+    return await this.vaultService.getProjectKeys('default-project');
+  }
+
+  /**
+   * Rotate project encryption keys
+   */
+  async rotateProjectKeys(): Promise<{
+    oldKeys: { encryptionKey: string; signingKey: string };
+    newKeys: { encryptionKey: string; signingKey: string };
+  }> {
+    return await this.vaultService.rotateProjectKeys('default-project');
+  }
+
+  /**
+   * Get supported OAuth providers
+   */
+  getSupportedProviders(): any[] {
+    return this.provisioningService.getSupportedProviders();
+  }
+
+  /**
+   * Get Vault health status
+   */
+  async getVaultHealth(): Promise<any> {
+    return await this.vaultService.getHealthStatus();
+  }
+
+  /**
+   * Get usage statistics
+   */
+  async getStats(): Promise<{
+    oauth: any;
+    vault: any;
+  }> {
+    const [oauthStats, vaultStats] = await Promise.all([
+      Promise.resolve(this.provisioningService.getStats()),
+      this.vaultService.getStats(),
+    ]);
+
+    return {
+      oauth: oauthStats,
+      vault: vaultStats,
+    };
+  }
+}
+
+// Provider-specific OAuth helpers
+export class GitHubOAuthHelper extends OAuthHelper {
+  constructor(config: { clientId: string; clientSecret: string }) {
+    super({
+      vault: {
+        address: process.env.VAULT_ADDR || 'http://localhost:8200',
+        token: process.env.VAULT_TOKEN,
+      },
+      providers: {
+        github: {
+          provider: 'github',
+          clientId: config.clientId,
+          clientSecret: config.clientSecret,
+          scopes: ['repo', 'user:email'],
+          redirectUri: process.env.GITHUB_REDIRECT_URI,
+        },
+      },
+    });
+  }
+
+  async getUserInfo(accessToken: string): Promise<any> {
+    // GitHub-specific user info retrieval
+    const response = await fetch('https://api.github.com/user', {
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'Accept': 'application/vnd.github.v3+json',
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error(`GitHub API error: ${response.statusText}`);
+    }
+
+    return await response.json();
+  }
+}
+
+export class GoogleOAuthHelper extends OAuthHelper {
+  constructor(config: { clientId: string; clientSecret: string }) {
+    super({
+      vault: {
+        address: process.env.VAULT_ADDR || 'http://localhost:8200',
+        token: process.env.VAULT_TOKEN,
+      },
+      providers: {
+        google: {
+          provider: 'google',
+          clientId: config.clientId,
+          clientSecret: config.clientSecret,
+          scopes: ['https://www.googleapis.com/auth/userinfo.email', 'https://www.googleapis.com/auth/userinfo.profile'],
+          redirectUri: process.env.GOOGLE_REDIRECT_URI,
+        },
+      },
+    });
+  }
+
+  async getUserInfo(accessToken: string): Promise<any> {
+    // Google-specific user info retrieval
+    const response = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error(`Google API error: ${response.statusText}`);
+    }
+
+    return await response.json();
+  }
+}
+
+// Utility functions
+export function createOAuthHelperForProvider(
+  provider: string,
+  config: { clientId: string; clientSecret: string }
+): OAuthHelper {
+  switch (provider) {
+    case 'github':
+      return new GitHubOAuthHelper(config);
+    case 'google':
+      return new GoogleOAuthHelper(config);
+    default:
+      throw new Error(`Unsupported OAuth provider: ${provider}`);
+  }
+}
+
+export function generateSecureState(): string {
+  return require('crypto').randomBytes(32).toString('hex');
+}
+
+export function validateState(receivedState: string, expectedState: string): boolean {
+  return require('crypto').timingSafeEqual(
+    Buffer.from(receivedState, 'hex'),
+    Buffer.from(expectedState, 'hex')
+  );
+}

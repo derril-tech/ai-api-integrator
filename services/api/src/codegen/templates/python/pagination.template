@@ -1,0 +1,434 @@
+"""
+Pagination utilities for {{entityName}} API Client
+
+This module provides utilities for handling paginated responses and
+implementing different pagination strategies.
+"""
+
+from typing import Any, Dict, List, Optional, AsyncGenerator, Callable
+import asyncio
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+class PaginatedResponse:
+    """
+    Wrapper for paginated API responses.
+
+    Provides convenient methods for accessing pagination metadata
+    and iterating through results.
+    """
+
+    def __init__(
+        self,
+        data: List[Dict[str, Any]],
+        meta: Dict[str, Any],
+        response_metadata: Optional[Dict[str, Any]] = None,
+    ):
+        """
+        Initialize paginated response.
+
+        Args:
+            data: List of items in this page
+            meta: Pagination metadata
+            response_metadata: Additional response metadata
+        """
+        self.data = data
+        self.meta = meta
+        self.response_metadata = response_metadata or {}
+
+        # Extract common pagination fields
+        self.page = meta.get('page', 1)
+        self.limit = meta.get('limit', len(data))
+        self.total = meta.get('total', len(data))
+        self.total_pages = meta.get('totalPages', meta.get('total_pages', 1))
+        self.has_more = meta.get('hasMore', meta.get('has_more', False))
+        self.next_page = meta.get('nextPage', meta.get('next_page'))
+        self.prev_page = meta.get('prevPage', meta.get('prev_page'))
+
+    def __iter__(self):
+        """Iterate over the data items."""
+        return iter(self.data)
+
+    def __len__(self):
+        """Return the number of items in this page."""
+        return len(self.data)
+
+    def __getitem__(self, index: int) -> Dict[str, Any]:
+        """Get item by index."""
+        return self.data[index]
+
+    def is_first_page(self) -> bool:
+        """Check if this is the first page."""
+        return self.page == 1
+
+    def is_last_page(self) -> bool:
+        """Check if this is the last page."""
+        return not self.has_more
+
+    def has_next_page(self) -> bool:
+        """Check if there's a next page."""
+        return self.has_more and self.next_page is not None
+
+    def has_prev_page(self) -> bool:
+        """Check if there's a previous page."""
+        return self.page > 1 and self.prev_page is not None
+
+    def get_page_info(self) -> Dict[str, Any]:
+        """Get page information summary."""
+        return {
+            'current_page': self.page,
+            'total_pages': self.total_pages,
+            'items_on_page': len(self.data),
+            'total_items': self.total,
+            'has_more': self.has_more,
+            'next_page': self.next_page,
+            'prev_page': self.prev_page,
+        }
+
+
+class PaginationIterator:
+    """
+    Iterator for paginated API endpoints.
+
+    Automatically handles pagination and yields individual items.
+    """
+
+    def __init__(
+        self,
+        client: Any,
+        endpoint: str,
+        params: Optional[Dict[str, Any]] = None,
+        max_pages: Optional[int] = None,
+        page_size: int = 100,
+    ):
+        """
+        Initialize pagination iterator.
+
+        Args:
+            client: API client instance
+            endpoint: API endpoint path
+            params: Initial query parameters
+            max_pages: Maximum number of pages to fetch
+            page_size: Number of items per page
+        """
+        self.client = client
+        self.endpoint = endpoint
+        self.params = params or {}
+        self.max_pages = max_pages
+        self.page_size = page_size
+
+        self.current_page = 1
+        self.total_fetched = 0
+        self.exhausted = False
+
+    def __aiter__(self):
+        """Async iterator protocol."""
+        return self
+
+    async def __anext__(self) -> Dict[str, Any]:
+        """Get next item from paginated results."""
+        while not self.exhausted:
+            # Fetch next page if needed
+            if not hasattr(self, '_current_response') or self._current_index >= len(self._current_response.data):
+                await self._fetch_next_page()
+
+            if self._current_index < len(self._current_response.data):
+                item = self._current_response.data[self._current_index]
+                self._current_index += 1
+                self.total_fetched += 1
+                return item
+
+            # If we get here, we've exhausted the current page
+            if not self._current_response.has_more:
+                self.exhausted = True
+                break
+
+        raise StopAsyncIteration
+
+    async def _fetch_next_page(self):
+        """Fetch the next page of results."""
+        request_params = {
+            **self.params,
+            'page': self.current_page,
+            'limit': self.page_size,
+        }
+
+        logger.debug(f"Fetching page {self.current_page} from {self.endpoint}")
+
+        response = await self.client._make_request('GET', self.endpoint, params=request_params)
+        self._current_response = PaginatedResponse(
+            response.get('data', []),
+            response.get('meta', {}),
+            response
+        )
+
+        self._current_index = 0
+        self.current_page += 1
+
+        # Check if we've reached max pages
+        if self.max_pages and self.current_page > self.max_pages:
+            self.exhausted = True
+
+    async def to_list(self, max_items: Optional[int] = None) -> List[Dict[str, Any]]:
+        """
+        Convert paginated results to a list.
+
+        Args:
+            max_items: Maximum number of items to fetch
+
+        Returns:
+            List of all items
+        """
+        items = []
+        async for item in self:
+            items.append(item)
+            if max_items and len(items) >= max_items:
+                break
+        return items
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Get pagination statistics."""
+        return {
+            'current_page': self.current_page - 1,
+            'total_fetched': self.total_fetched,
+            'exhausted': self.exhausted,
+            'max_pages': self.max_pages,
+        }
+
+
+class CursorPaginationIterator:
+    """
+    Iterator for cursor-based pagination.
+
+    Handles cursor-based pagination schemes commonly used in modern APIs.
+    """
+
+    def __init__(
+        self,
+        client: Any,
+        endpoint: str,
+        params: Optional[Dict[str, Any]] = None,
+        max_pages: Optional[int] = None,
+        cursor_field: str = 'after',
+    ):
+        """
+        Initialize cursor pagination iterator.
+
+        Args:
+            client: API client instance
+            endpoint: API endpoint path
+            params: Initial query parameters
+            max_pages: Maximum number of pages to fetch
+            cursor_field: Name of the cursor field (e.g., 'after', 'before')
+        """
+        self.client = client
+        self.endpoint = endpoint
+        self.params = params or {}
+        self.max_pages = max_pages
+        self.cursor_field = cursor_field
+
+        self.current_cursor = None
+        self.page_count = 0
+        self.total_fetched = 0
+        self.exhausted = False
+        self.has_more = True
+
+    def __aiter__(self):
+        """Async iterator protocol."""
+        return self
+
+    async def __anext__(self) -> Dict[str, Any]:
+        """Get next item from cursor-paginated results."""
+        while not self.exhausted and self.has_more:
+            # Fetch next page if needed
+            if not hasattr(self, '_current_response') or self._current_index >= len(self._current_response.data):
+                await self._fetch_next_page()
+
+            if self._current_index < len(self._current_response.data):
+                item = self._current_response.data[self._current_index]
+                self._current_index += 1
+                self.total_fetched += 1
+                return item
+
+            # Check if there are more pages
+            self.has_more = self._current_response.has_more
+            if not self.has_more:
+                self.exhausted = True
+                break
+
+        raise StopAsyncIteration
+
+    async def _fetch_next_page(self):
+        """Fetch the next page using cursor."""
+        request_params = {**self.params}
+
+        if self.current_cursor:
+            request_params[self.cursor_field] = self.current_cursor
+
+        logger.debug(f"Fetching cursor page from {self.endpoint} with cursor {self.current_cursor}")
+
+        response = await self.client._make_request('GET', self.endpoint, params=request_params)
+        self._current_response = PaginatedResponse(
+            response.get('data', []),
+            response.get('meta', {}),
+            response
+        )
+
+        self._current_index = 0
+        self.page_count += 1
+
+        # Update cursor for next page
+        if self._current_response.has_more and self._current_response.meta.get('next_cursor'):
+            self.current_cursor = self._current_response.meta['next_cursor']
+        else:
+            self.has_more = False
+
+        # Check if we've reached max pages
+        if self.max_pages and self.page_count >= self.max_pages:
+            self.exhausted = True
+
+    async def to_list(self, max_items: Optional[int] = None) -> List[Dict[str, Any]]:
+        """
+        Convert cursor-paginated results to a list.
+
+        Args:
+            max_items: Maximum number of items to fetch
+
+        Returns:
+            List of all items
+        """
+        items = []
+        async for item in self:
+            items.append(item)
+            if max_items and len(items) >= max_items:
+                break
+        return items
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Get cursor pagination statistics."""
+        return {
+            'pages_fetched': self.page_count,
+            'total_fetched': self.total_fetched,
+            'current_cursor': self.current_cursor,
+            'exhausted': self.exhausted,
+            'has_more': self.has_more,
+            'max_pages': self.max_pages,
+        }
+
+
+# Utility functions for pagination
+def detect_pagination_type(response: Dict[str, Any]) -> str:
+    """
+    Detect the pagination type from a response.
+
+    Args:
+        response: API response data
+
+    Returns:
+        Pagination type: 'offset', 'cursor', 'page', or 'unknown'
+    """
+    meta = response.get('meta', response.get('pagination', {}))
+
+    if meta.get('next_cursor') or meta.get('after') or meta.get('before'):
+        return 'cursor'
+    elif meta.get('page') and meta.get('total_pages'):
+        return 'page'
+    elif meta.get('offset') or (meta.get('page') and meta.get('limit')):
+        return 'offset'
+    else:
+        return 'unknown'
+
+
+def create_pagination_iterator(
+    client: Any,
+    endpoint: str,
+    response_sample: Dict[str, Any],
+    params: Optional[Dict[str, Any]] = None,
+    **kwargs
+) -> Union[PaginationIterator, CursorPaginationIterator]:
+    """
+    Create appropriate pagination iterator based on response structure.
+
+    Args:
+        client: API client instance
+        endpoint: API endpoint path
+        response_sample: Sample response to detect pagination type
+        params: Initial query parameters
+        **kwargs: Additional arguments for iterator
+
+    Returns:
+        Appropriate pagination iterator instance
+    """
+    pagination_type = detect_pagination_type(response_sample)
+
+    if pagination_type == 'cursor':
+        return CursorPaginationIterator(client, endpoint, params, **kwargs)
+    else:
+        return PaginationIterator(client, endpoint, params, **kwargs)
+
+
+# Rate limiting helpers (for pagination with rate limits)
+class RateLimitedPaginator:
+    """
+    Paginator that respects rate limits and implements intelligent delays.
+    """
+
+    def __init__(
+        self,
+        client: Any,
+        endpoint: str,
+        params: Optional[Dict[str, Any]] = None,
+        requests_per_second: float = 1.0,
+        **kwargs
+    ):
+        """
+        Initialize rate-limited paginator.
+
+        Args:
+            client: API client instance
+            endpoint: API endpoint path
+            params: Initial query parameters
+            requests_per_second: Maximum requests per second
+            **kwargs: Additional arguments for base iterator
+        """
+        self.client = client
+        self.endpoint = endpoint
+        self.params = params or {}
+        self.requests_per_second = requests_per_second
+        self.min_delay = 1.0 / requests_per_second
+
+        # Create base iterator
+        self.iterator = PaginationIterator(client, endpoint, params, **kwargs)
+        self.last_request_time = 0
+
+    def __aiter__(self):
+        """Async iterator protocol."""
+        return self
+
+    async def __anext__(self) -> Dict[str, Any]:
+        """Get next item with rate limiting."""
+        # Implement rate limiting
+        current_time = asyncio.get_event_loop().time()
+        time_since_last_request = current_time - self.last_request_time
+
+        if time_since_last_request < self.min_delay:
+            delay = self.min_delay - time_since_last_request
+            await asyncio.sleep(delay)
+
+        try:
+            item = await self.iterator.__anext__()
+            self.last_request_time = asyncio.get_event_loop().time()
+            return item
+        except StopAsyncIteration:
+            raise
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Get rate-limited pagination statistics."""
+        base_stats = self.iterator.get_stats()
+        return {
+            **base_stats,
+            'rate_limit': self.requests_per_second,
+            'min_delay': self.min_delay,
+        }

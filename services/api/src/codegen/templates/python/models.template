@@ -1,0 +1,193 @@
+"""
+Data models for {{entityName}} API
+
+This module contains Pydantic models for all {{entityName}} API data structures.
+"""
+
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Union
+from pydantic import BaseModel, Field, validator
+
+
+# Base response model
+class BaseResponse(BaseModel):
+    """Base response model with common fields."""
+    id: str
+    created_at: datetime = Field(alias="createdAt")
+    updated_at: Optional[datetime] = Field(None, alias="updatedAt")
+
+    class Config:
+        allow_population_by_field_name = True
+        json_encoders = {
+            datetime: lambda v: v.isoformat(),
+        }
+
+
+# Pagination models
+class PaginationMeta(BaseModel):
+    """Pagination metadata."""
+    page: int
+    limit: int
+    total: int
+    total_pages: int = Field(alias="totalPages")
+    has_more: bool = Field(alias="hasMore")
+    next_page: Optional[int] = Field(None, alias="nextPage")
+    prev_page: Optional[int] = Field(None, alias="prevPage")
+
+
+class PaginatedResponse(BaseModel):
+    """Paginated response wrapper."""
+    data: List[Dict[str, Any]]
+    meta: PaginationMeta
+
+    def __iter__(self):
+        """Allow iteration over the data."""
+        return iter(self.data)
+
+    def __len__(self):
+        """Return the number of items."""
+        return len(self.data)
+
+
+# Error models
+class ErrorDetail(BaseModel):
+    """Detailed error information."""
+    field: Optional[str]
+    message: str
+    code: Optional[str]
+
+
+class APIError(BaseModel):
+    """API error response."""
+    error: str
+    message: str
+    code: Optional[str]
+    details: Optional[List[ErrorDetail]]
+    timestamp: Optional[datetime]
+
+
+# Common data types
+class Address(BaseModel):
+    """Address model."""
+    street: Optional[str]
+    city: Optional[str]
+    state: Optional[str]
+    postal_code: Optional[str] = Field(None, alias="postalCode")
+    country: Optional[str]
+
+    class Config:
+        allow_population_by_field_name = True
+
+
+class ContactInfo(BaseModel):
+    """Contact information model."""
+    email: Optional[str]
+    phone: Optional[str]
+    website: Optional[str]
+
+
+# Generate models from OpenAPI spec
+{% for model in models %}
+class {{ model.name | pascal_case }}(BaseResponse):
+    """{{ model.description or model.name }} model."""
+
+    {% for field in model.fields %}
+    {% if field.required %}
+    {{ field.name | snake_case }}: {{ field.type | python_type }}
+    {% else %}
+    {{ field.name | snake_case }}: Optional[{{ field.type | python_type }}] = None
+    {% endif %}
+    {% endfor %}
+
+    {% if model.example %}
+    class Config:
+        schema_extra = {
+            "example": {{ model.example | tojson }}
+        }
+    {% endif %}
+{% endfor %}
+
+# Request models for API operations
+{% for endpoint in endpoints %}
+{% if endpoint.method in ['POST', 'PUT'] and endpoint.requestBody %}
+class {{ endpoint.path | operation_name }}{{ endpoint.method | title }}Request(BaseModel):
+    """Request model for {{ endpoint.method | upper }} {{ endpoint.path }}."""
+
+    {% if endpoint.requestBody.schema %}
+    {% for field in endpoint.requestBody.schema.properties %}
+    {% if field.name in endpoint.requestBody.schema.required %}
+    {{ field.name | snake_case }}: {{ field.type | python_type }}
+    {% else %}
+    {{ field.name | snake_case }}: Optional[{{ field.type | python_type }}] = None
+    {% endif %}
+    {% endfor %}
+    {% endif %}
+
+    {% if endpoint.requestBody.example %}
+    class Config:
+        schema_extra = {
+            "example": {{ endpoint.requestBody.example | tojson }}
+        }
+    {% endif %}
+{% endif %}
+{% endfor %}
+
+# Enums from the spec
+{% for model in models %}
+{% if model.enum %}
+class {{ model.name | pascal_case }}Enum(str, Enum):
+    """{{ model.name }} enum values."""
+    {% for value in model.enum %}
+    {{ value | upper }} = "{{ value }}"
+    {% endfor %}
+{% endif %}
+{% endfor %}
+
+# Utility models
+class HealthCheckResponse(BaseModel):
+    """Health check response."""
+    status: str
+    timestamp: datetime
+    version: Optional[str]
+    uptime: Optional[float]
+
+
+class RateLimitInfo(BaseModel):
+    """Rate limit information."""
+    limit: int
+    remaining: int
+    reset: datetime
+    retry_after: Optional[int] = Field(None, alias="retryAfter")
+
+    class Config:
+        allow_population_by_field_name = True
+
+
+# Webhook models (if applicable)
+class WebhookEvent(BaseModel):
+    """Webhook event model."""
+    id: str
+    type: str
+    data: Dict[str, Any]
+    created_at: datetime = Field(alias="createdAt")
+    webhook_id: Optional[str] = Field(None, alias="webhookId")
+
+    class Config:
+        allow_population_by_field_name = True
+
+
+class WebhookDelivery(BaseModel):
+    """Webhook delivery attempt model."""
+    id: str
+    webhook_event_id: str = Field(alias="webhookEventId")
+    url: str
+    status: str
+    status_code: Optional[int] = Field(None, alias="statusCode")
+    response_body: Optional[str] = Field(None, alias="responseBody")
+    error_message: Optional[str] = Field(None, alias="errorMessage")
+    attempt_number: int = Field(alias="attemptNumber")
+    delivered_at: Optional[datetime] = Field(None, alias="deliveredAt")
+    created_at: datetime = Field(alias="createdAt")
+
+    class Config:
+        allow_population_by_field_name = True

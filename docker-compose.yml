@@ -1,0 +1,76 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: ai-api-postgres
+    environment:
+      POSTGRES_DB: ai_api_integrator
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - ai-api-network
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: ai-api-redis
+    ports:
+      - "6379:6379"
+    networks:
+      - ai-api-network
+    restart: unless-stopped
+
+  nats:
+    image: nats:2.10-alpine
+    container_name: ai-api-nats
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    command: ["-js"]
+    networks:
+      - ai-api-network
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:latest
+    container_name: ai-api-minio
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    command: ["server", "/data", "--console-address", ":9001"]
+    networks:
+      - ai-api-network
+    restart: unless-stopped
+
+  # Optional: PgAdmin for database management
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: ai-api-pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@ai-api-integrator.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "5050:80"
+    networks:
+      - ai-api-network
+    restart: unless-stopped
+    depends_on:
+      - postgres
+
+networks:
+  ai-api-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  minio_data:

@@ -1,0 +1,500 @@
+// Webhook Handler with Signature Validation
+package webhook
+
+import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"hash"
+	"log"
+	"net/http"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+)
+
+// WebhookConfig holds webhook validation configuration
+type WebhookConfig struct {
+	Secret       string        `json:"secret"`
+	Tolerance    time.Duration `json:"tolerance"`     // Time tolerance for timestamp-based signatures
+	MaxBodySize  int64         `json:"maxBodySize"`   // Maximum body size in bytes
+	Algorithm    string        `json:"algorithm"`     // Hash algorithm (sha256, sha1)
+	HeaderName   string        `json:"headerName"`    // Header containing signature
+	Prefix       string        `json:"prefix"`        // Signature prefix (e.g., "sha256=")
+}
+
+// DefaultWebhookConfig returns a default webhook configuration
+func DefaultWebhookConfig(secret string) *WebhookConfig {
+	return &WebhookConfig{
+		Secret:      secret,
+		Tolerance:   5 * time.Minute,
+		MaxBodySize: 1024 * 1024, // 1MB
+		Algorithm:   "sha256",
+		HeaderName:  "X-Hub-Signature-256",
+		Prefix:      "sha256=",
+	}
+}
+
+// WebhookEvent represents a webhook event
+type WebhookEvent struct {
+	ID        string                 `json:"id"`
+	Type      string                 `json:"type"`
+	Data      map[string]interface{} `json:"data"`
+	Timestamp *int64                 `json:"timestamp,omitempty"`
+	Signature *string                `json:"signature,omitempty"`
+	Headers   map[string]string      `json:"headers,omitempty"`
+}
+
+// WebhookValidationResult contains the result of webhook validation
+type WebhookValidationResult struct {
+	IsValid           bool   `json:"isValid"`
+	Error             string `json:"error,omitempty"`
+	Signature         string `json:"signature,omitempty"`
+	ExpectedSignature string `json:"expectedSignature,omitempty"`
+	Algorithm         string `json:"algorithm,omitempty"`
+	Timestamp         *int64 `json:"timestamp,omitempty"`
+	IsReplay          bool   `json:"isReplay"`
+}
+
+// WebhookValidator handles webhook signature validation
+type WebhookValidator struct {
+	config          *WebhookConfig
+	processedEvents map[string]time.Time
+	mu              sync.RWMutex
+	maxProcessedEvents int
+}
+
+// NewWebhookValidator creates a new webhook validator
+func NewWebhookValidator(config *WebhookConfig) *WebhookValidator {
+	return &WebhookValidator{
+		config:             config,
+		processedEvents:    make(map[string]time.Time),
+		maxProcessedEvents: 10000,
+	}
+}
+
+// ValidateSignature validates a webhook signature
+func (v *WebhookValidator) ValidateSignature(payload []byte, signature string) WebhookValidationResult {
+	// Remove prefix if present
+	cleanSignature := signature
+	if v.config.Prefix != "" && strings.HasPrefix(signature, v.config.Prefix) {
+		cleanSignature = strings.TrimPrefix(signature, v.config.Prefix)
+	}
+
+	// Decode signature
+	signatureBytes, err := hex.DecodeString(cleanSignature)
+	if err != nil {
+		return WebhookValidationResult{
+			IsValid: false,
+			Error:   fmt.Sprintf("Failed to decode signature: %v", err),
+		}
+	}
+
+	// Create expected signature
+	var h hash.Hash
+	switch v.config.Algorithm {
+	case "sha256":
+		h = hmac.New(sha256.New, []byte(v.config.Secret))
+	case "sha1":
+		h = hmac.New(sha1.New, []byte(v.config.Secret))
+	default:
+		return WebhookValidationResult{
+			IsValid: false,
+			Error:   fmt.Sprintf("Unsupported algorithm: %s", v.config.Algorithm),
+		}
+	}
+
+	h.Write(payload)
+	expectedSignature := h.Sum(nil)
+
+	// Compare signatures using constant-time comparison
+	isValid := hmac.Equal(signatureBytes, expectedSignature)
+
+	return WebhookValidationResult{
+		IsValid:           isValid,
+		Signature:         cleanSignature,
+		ExpectedSignature: hex.EncodeToString(expectedSignature),
+		Algorithm:         v.config.Algorithm,
+	}
+}
+
+// ValidateTimestampedWebhook validates a webhook with timestamp
+func (v *WebhookValidator) ValidateTimestampedWebhook(payload []byte, signature string, timestamp int64) WebhookValidationResult {
+	now := time.Now().Unix()
+
+	// Check timestamp tolerance
+	if v.config.Tolerance > 0 {
+		timeDiff := time.Duration(now-timestamp) * time.Second
+		if timeDiff < 0 {
+			timeDiff = -timeDiff
+		}
+
+		if timeDiff > v.config.Tolerance {
+			return WebhookValidationResult{
+				IsValid:  false,
+				Error:    fmt.Sprintf("Timestamp outside tolerance window (±%v)", v.config.Tolerance),
+				Timestamp: &timestamp,
+				IsReplay:  true,
+			}
+		}
+	}
+
+	// Create timestamped payload
+	timestampedPayload := fmt.Sprintf("%d.%s", timestamp, string(payload))
+	result := v.ValidateSignature([]byte(timestampedPayload), signature)
+
+	return WebhookValidationResult{
+		IsValid:           result.IsValid,
+		Error:             result.Error,
+		Signature:         result.Signature,
+		ExpectedSignature: result.ExpectedSignature,
+		Algorithm:         result.Algorithm,
+		Timestamp:         &timestamp,
+	}
+}
+
+// IsReplayAttack checks if this is a replay attack
+func (v *WebhookValidator) IsReplayAttack(eventID string) bool {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
+	if _, exists := v.processedEvents[eventID]; exists {
+		return true
+	}
+
+	// Add to processed events
+	v.processedEvents[eventID] = time.Now()
+
+	// Maintain size limit
+	if len(v.processedEvents) > v.maxProcessedEvents {
+		// Remove oldest entry
+		var oldestID string
+		var oldestTime time.Time
+		for id, t := range v.processedEvents {
+			if oldestID == "" || t.Before(oldestTime) {
+				oldestID = id
+				oldestTime = t
+			}
+		}
+		delete(v.processedEvents, oldestID)
+	}
+
+	return false
+}
+
+// ValidateWebhookEvent validates a complete webhook event
+func (v *WebhookValidator) ValidateWebhookEvent(event *WebhookEvent, signature *string) WebhookValidationResult {
+	// Check for replay attack
+	if event.ID != "" && v.IsReplayAttack(event.ID) {
+		return WebhookValidationResult{
+			IsValid:  false,
+			Error:    "Event ID already processed (potential replay attack)",
+			IsReplay: true,
+		}
+	}
+
+	// Get signature
+	webhookSignature := signature
+	if webhookSignature == nil && event.Signature != nil {
+		webhookSignature = event.Signature
+	}
+
+	if webhookSignature == nil || *webhookSignature == "" {
+		return WebhookValidationResult{
+			IsValid: false,
+			Error:   "Missing webhook signature",
+		}
+	}
+
+	// Prepare payload
+	payload, err := json.Marshal(event.Data)
+	if err != nil {
+		return WebhookValidationResult{
+			IsValid: false,
+			Error:   fmt.Sprintf("Failed to marshal event data: %v", err),
+		}
+	}
+
+	// Validate with or without timestamp
+	if event.Timestamp != nil {
+		return v.ValidateTimestampedWebhook(payload, *webhookSignature, *event.Timestamp)
+	} else {
+		return v.ValidateSignature(payload, *webhookSignature)
+	}
+}
+
+// WebhookHandler handles webhook processing
+type WebhookHandler struct {
+	validator      *WebhookValidator
+	eventHandlers  map[string]EventHandler
+}
+
+// EventHandler represents an event handler function
+type EventHandler func(event *WebhookEvent) error
+
+// NewWebhookHandler creates a new webhook handler
+func NewWebhookHandler(config *WebhookConfig) *WebhookHandler {
+	return &WebhookHandler{
+		validator:     NewWebhookValidator(config),
+		eventHandlers: make(map[string]EventHandler),
+	}
+}
+
+// On registers an event handler
+func (h *WebhookHandler) On(eventType string, handler EventHandler) {
+	h.eventHandlers[eventType] = handler
+}
+
+// HandleWebhook processes an incoming webhook
+func (h *WebhookHandler) HandleWebhook(w http.ResponseWriter, r *http.Request) {
+	// Validate HTTP method
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Validate content type
+	contentType := r.Header.Get("Content-Type")
+	if !strings.Contains(contentType, "application/json") {
+		http.Error(w, "Invalid content type. Expected application/json", http.StatusBadRequest)
+		return
+	}
+
+	// Check body size
+	if r.ContentLength > h.validator.config.MaxBodySize {
+		http.Error(w, "Payload too large", http.StatusRequestEntityTooLarge)
+		return
+	}
+
+	// Read body
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to read request body: %v", err), http.StatusBadRequest)
+		return
+	}
+	defer r.Body.Close()
+
+	// Get signature from header
+	signature := r.Header.Get(h.validator.config.HeaderName)
+	if signature == "" {
+		http.Error(w, fmt.Sprintf("Missing signature header: %s", h.validator.config.HeaderName), http.StatusUnauthorized)
+		return
+	}
+
+	// Parse webhook data
+	var webhookData map[string]interface{}
+	if err := json.Unmarshal(body, &webhookData); err != nil {
+		http.Error(w, fmt.Sprintf("Invalid JSON: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	// Extract timestamp if present
+	var timestamp *int64
+	if ts, ok := webhookData["timestamp"].(float64); ok {
+		tsInt := int64(ts)
+		timestamp = &tsInt
+	}
+
+	// Create webhook event
+	event := &WebhookEvent{
+		ID:        getStringValue(webhookData, "id", fmt.Sprintf("webhook_%d", time.Now().Unix())),
+		Type:      getStringValue(webhookData, "type", getStringValue(webhookData, "event_type", "unknown")),
+		Data:      webhookData,
+		Timestamp: timestamp,
+		Headers:   make(map[string]string),
+	}
+
+	// Copy relevant headers
+	for key, values := range r.Header {
+		if len(values) > 0 {
+			event.Headers[key] = values[0]
+		}
+	}
+
+	// Validate webhook
+	validation := h.validator.ValidateWebhookEvent(event, &signature)
+
+	if !validation.IsValid {
+		log.Printf("Invalid webhook signature: %s", validation.Error)
+		http.Error(w, "Invalid webhook signature", http.StatusUnauthorized)
+		return
+	}
+
+	// Process event
+	if err := h.processEvent(event); err != nil {
+		log.Printf("Event processing error: %v", err)
+		http.Error(w, "Event processing failed", http.StatusInternalServerError)
+		return
+	}
+
+	// Return success
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":   "success",
+		"eventId":  event.ID,
+		"processed": true,
+	})
+}
+
+// processEvent processes a webhook event
+func (h *WebhookHandler) processEvent(event *WebhookEvent) error {
+	log.Printf("Processing webhook event: %s (%s)", event.Type, event.ID)
+
+	// Call general event handler
+	if generalHandler, exists := h.eventHandlers["*"]; exists {
+		if err := generalHandler(event); err != nil {
+			log.Printf("General event handler error for %s: %v", event.Type, err)
+		}
+	}
+
+	// Call type-specific handler
+	if typeHandler, exists := h.eventHandlers[event.Type]; exists {
+		return typeHandler(event)
+	}
+
+	log.Printf("No handler registered for event type: %s", event.Type)
+	return nil
+}
+
+// GetStats returns webhook processing statistics
+func (h *WebhookHandler) GetStats() map[string]interface{} {
+	h.validator.mu.RLock()
+	processedCount := len(h.validator.processedEvents)
+	h.validator.mu.RUnlock()
+
+	return map[string]interface{}{
+		"processedEvents":    processedCount,
+		"registeredHandlers": len(h.eventHandlers),
+		"eventTypes":         getMapKeys(h.eventHandlers),
+	}
+}
+
+// Provider-specific webhook handlers
+
+// GitHubWebhookHandler handles GitHub webhooks
+type GitHubWebhookHandler struct {
+	*WebhookHandler
+}
+
+// NewGitHubWebhookHandler creates a new GitHub webhook handler
+func NewGitHubWebhookHandler(secret string) *GitHubWebhookHandler {
+	config := DefaultWebhookConfig(secret)
+	config.HeaderName = "X-Hub-Signature-256"
+	config.Tolerance = 5 * time.Minute
+
+	handler := &GitHubWebhookHandler{
+		WebhookHandler: NewWebhookHandler(config),
+	}
+
+	// Register GitHub-specific handlers
+	handler.On("push", handler.handlePush)
+	handler.On("pull_request", handler.handlePullRequest)
+	handler.On("issues", handler.handleIssues)
+
+	return handler
+}
+
+func (h *GitHubWebhookHandler) handlePush(event *WebhookEvent) error {
+	log.Printf("GitHub push event: %v", event.Data)
+	return nil
+}
+
+func (h *GitHubWebhookHandler) handlePullRequest(event *WebhookEvent) error {
+	log.Printf("GitHub pull request event: %v", event.Data)
+	return nil
+}
+
+func (h *GitHubWebhookHandler) handleIssues(event *WebhookEvent) error {
+	log.Printf("GitHub issues event: %v", event.Data)
+	return nil
+}
+
+// StripeWebhookHandler handles Stripe webhooks
+type StripeWebhookHandler struct {
+	*WebhookHandler
+}
+
+// NewStripeWebhookHandler creates a new Stripe webhook handler
+func NewStripeWebhookHandler(secret string) *StripeWebhookHandler {
+	config := DefaultWebhookConfig(secret)
+	config.HeaderName = "Stripe-Signature"
+	config.Tolerance = 5 * time.Minute
+
+	handler := &StripeWebhookHandler{
+		WebhookHandler: NewWebhookHandler(config),
+	}
+
+	// Register Stripe-specific handlers
+	handler.On("payment_intent.succeeded", handler.handlePaymentSuccess)
+	handler.On("payment_intent.payment_failed", handler.handlePaymentFailure)
+	handler.On("customer.subscription.created", handler.handleSubscriptionCreated)
+
+	return handler
+}
+
+func (h *StripeWebhookHandler) handlePaymentSuccess(event *WebhookEvent) error {
+	log.Printf("Stripe payment success: %v", event.Data)
+	return nil
+}
+
+func (h *StripeWebhookHandler) handlePaymentFailure(event *WebhookEvent) error {
+	log.Printf("Stripe payment failure: %v", event.Data)
+	return nil
+}
+
+func (h *StripeWebhookHandler) handleSubscriptionCreated(event *WebhookEvent) error {
+	log.Printf("Stripe subscription created: %v", event.Data)
+	return nil
+}
+
+// Utility functions
+
+func getStringValue(data map[string]interface{}, key, defaultValue string) string {
+	if value, ok := data[key].(string); ok {
+		return value
+	}
+	return defaultValue
+}
+
+func getMapKeys(m map[string]EventHandler) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+// GenerateWebhookSignature generates a webhook signature for testing
+func GenerateWebhookSignature(payload, secret string) string {
+	h := hmac.New(sha256.New, []byte(secret))
+	h.Write([]byte(payload))
+	return fmt.Sprintf("sha256=%s", hex.EncodeToString(h.Sum(nil)))
+}
+
+// GenerateTimestampedSignature generates a timestamped webhook signature
+func GenerateTimestampedSignature(payload, secret string, timestamp int64) string {
+	timestampedPayload := fmt.Sprintf("%d.%s", timestamp, payload)
+	h := hmac.New(sha256.New, []byte(secret))
+	h.Write([]byte(timestampedPayload))
+	return fmt.Sprintf("sha256=%s", hex.EncodeToString(h.Sum(nil)))
+}
+
+// HTTP middleware for webhook validation
+func WebhookMiddleware(handler *WebhookHandler) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Handle webhook validation
+			if strings.HasPrefix(r.URL.Path, "/webhooks/") {
+				handler.HandleWebhook(w, r)
+				return
+			}
+
+			// Continue to next handler
+			next.ServeHTTP(w, r)
+		})
+	}
+}

@@ -1,0 +1,67 @@
+version: '3.8'
+
+services:
+  postgres-test:
+    image: pgvector/pgvector:pg15
+    container_name: postgres-test
+    environment:
+      POSTGRES_DB: ai_api_integrator_test
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_test_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis-test:
+    image: redis:7-alpine
+    container_name: redis-test
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis_test_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  minio-test:
+    image: minio/minio:latest
+    container_name: minio-test
+    environment:
+      MINIO_ROOT_USER: testkey
+      MINIO_ROOT_PASSWORD: testsecret
+    ports:
+      - "9001:9000"
+      - "9002:9001"
+    volumes:
+      - minio_test_data:/data
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  mailhog-test:
+    image: mailhog/mailhog:latest
+    container_name: mailhog-test
+    ports:
+      - "1026:1025" # SMTP
+      - "8026:8025" # Web UI
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8025"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  postgres_test_data:
+  redis_test_data:
+  minio_test_data:

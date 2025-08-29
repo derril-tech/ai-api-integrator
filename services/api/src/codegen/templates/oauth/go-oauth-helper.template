@@ -1,0 +1,581 @@
+// OAuth Helper for {{entityName}} API
+package oauth
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"io"
+	"math/big"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+)
+
+// OAuthProvider represents an OAuth provider configuration
+type OAuthProvider struct {
+	Name              string   `json:"name"`
+	DisplayName       string   `json:"displayName"`
+	AuthorizationURL  string   `json:"authorizationUrl"`
+	TokenURL          string   `json:"tokenUrl"`
+	Scopes            []string `json:"scopes"`
+	ClientIDRequired  bool     `json:"clientIdRequired"`
+	ClientSecretRequired bool  `json:"clientSecretRequired"`
+	RedirectURIRequired bool   `json:"redirectUriRequired"`
+	SupportsPKCE      bool     `json:"supportsPkce"`
+	DocumentationURL  string   `json:"documentationUrl"`
+}
+
+// OAuthAppConfig holds OAuth application configuration
+type OAuthAppConfig struct {
+	Provider     string            `json:"provider"`
+	ClientID     string            `json:"clientId"`
+	ClientSecret string            `json:"clientSecret"`
+	RedirectURI  string            `json:"redirectUri,omitempty"`
+	Scopes       []string          `json:"scopes,omitempty"`
+	Params       map[string]string `json:"params,omitempty"`
+}
+
+// ProvisionedOAuthApp represents a provisioned OAuth application
+type ProvisionedOAuthApp struct {
+	ID          string    `json:"id"`
+	Provider    string    `json:"provider"`
+	ClientID    string    `json:"clientId"`
+	ClientSecret string   `json:"clientSecret"`
+	RedirectURI string    `json:"redirectUri,omitempty"`
+	Scopes      []string  `json:"scopes"`
+	CreatedAt   time.Time `json:"createdAt"`
+	UpdatedAt   time.Time `json:"updatedAt"`
+	IsActive    bool      `json:"isActive"`
+}
+
+// OAuthTokens represents OAuth token response
+type OAuthTokens struct {
+	AccessToken  string `json:"accessToken"`
+	RefreshToken *string `json:"refreshToken,omitempty"`
+	TokenType    string `json:"tokenType"`
+	ExpiresAt    *time.Time `json:"expiresAt,omitempty"`
+	Scope        *string `json:"scope,omitempty"`
+	IDToken      *string `json:"idToken,omitempty"`
+}
+
+// OAuthFlowState represents OAuth flow state
+type OAuthFlowState struct {
+	State        string    `json:"state"`
+	Provider     string    `json:"provider"`
+	RedirectURI  string    `json:"redirectUri"`
+	Scopes       []string  `json:"scopes"`
+	CodeVerifier *string   `json:"codeVerifier,omitempty"`
+	ExpiresAt    time.Time `json:"expiresAt"`
+}
+
+// VaultConfig holds Vault configuration
+type VaultConfig struct {
+	Address   string `json:"address"`
+	Token     string `json:"token,omitempty"`
+	RoleID    string `json:"roleId,omitempty"`
+	SecretID  string `json:"secretId,omitempty"`
+	Namespace string `json:"namespace,omitempty"`
+}
+
+// OAuthProvisioningService handles OAuth application provisioning
+type OAuthProvisioningService struct {
+	providers   map[string]*OAuthProvider
+	flowStates  map[string]*OAuthFlowState
+}
+
+// NewOAuthProvisioningService creates a new OAuth provisioning service
+func NewOAuthProvisioningService() *OAuthProvisioningService {
+	return &OAuthProvisioningService{
+		providers:  getSupportedProviders(),
+		flowStates: make(map[string]*OAuthFlowState),
+	}
+}
+
+// getSupportedProviders returns all supported OAuth providers
+func getSupportedProviders() map[string]*OAuthProvider {
+	return map[string]*OAuthProvider{
+		"github": {
+			Name:                "github",
+			DisplayName:         "GitHub",
+			AuthorizationURL:    "https://github.com/login/oauth/authorize",
+			TokenURL:            "https://github.com/login/oauth/access_token",
+			Scopes:              []string{"repo", "user", "read:org"},
+			ClientIDRequired:    true,
+			ClientSecretRequired: true,
+			RedirectURIRequired: true,
+			SupportsPKCE:        true,
+			DocumentationURL:    "https://docs.github.com/en/developers/apps/building-oauth-apps/authorizing-oauth-apps",
+		},
+		"gitlab": {
+			Name:                "gitlab",
+			DisplayName:         "GitLab",
+			AuthorizationURL:    "https://gitlab.com/oauth/authorize",
+			TokenURL:            "https://gitlab.com/oauth/token",
+			Scopes:              []string{"api", "read_user", "read_repository"},
+			ClientIDRequired:    true,
+			ClientSecretRequired: true,
+			RedirectURIRequired: true,
+			SupportsPKCE:        true,
+			DocumentationURL:    "https://docs.gitlab.com/ee/api/oauth2.html",
+		},
+		"google": {
+			Name:                "google",
+			DisplayName:         "Google",
+			AuthorizationURL:    "https://accounts.google.com/o/oauth2/v2/auth",
+			TokenURL:            "https://oauth2.googleapis.com/token",
+			Scopes:              []string{"https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile"},
+			ClientIDRequired:    true,
+			ClientSecretRequired: true,
+			RedirectURIRequired: true,
+			SupportsPKCE:        true,
+			DocumentationURL:    "https://developers.google.com/identity/protocols/oauth2",
+		},
+		"microsoft": {
+			Name:                "microsoft",
+			DisplayName:         "Microsoft",
+			AuthorizationURL:    "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+			TokenURL:            "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+			Scopes:              []string{"https://graph.microsoft.com/User.Read", "https://graph.microsoft.com/Mail.Read"},
+			ClientIDRequired:    true,
+			ClientSecretRequired: true,
+			RedirectURIRequired: true,
+			SupportsPKCE:        true,
+			DocumentationURL:    "https://docs.microsoft.com/en-us/azure/active-directory/develop/v2-oauth2-auth-code-flow",
+		},
+		"slack": {
+			Name:                "slack",
+			DisplayName:         "Slack",
+			AuthorizationURL:    "https://slack.com/oauth/v2/authorize",
+			TokenURL:            "https://slack.com/api/oauth.v2.access",
+			Scopes:              []string{"channels:read", "chat:write", "users:read"},
+			ClientIDRequired:    true,
+			ClientSecretRequired: true,
+			RedirectURIRequired: true,
+			SupportsPKCE:        true,
+			DocumentationURL:    "https://api.slack.com/docs/oauth",
+		},
+		"discord": {
+			Name:                "discord",
+			DisplayName:         "Discord",
+			AuthorizationURL:    "https://discord.com/api/oauth2/authorize",
+			TokenURL:            "https://discord.com/api/oauth2/token",
+			Scopes:              []string{"identify", "email", "guilds"},
+			ClientIDRequired:    true,
+			ClientSecretRequired: true,
+			RedirectURIRequired: true,
+			SupportsPKCE:        true,
+			DocumentationURL:    "https://discord.com/developers/docs/topics/oauth2",
+		},
+	}
+}
+
+// GetSupportedProviders returns all supported OAuth providers
+func (s *OAuthProvisioningService) GetSupportedProviders() []*OAuthProvider {
+	providers := make([]*OAuthProvider, 0, len(s.providers))
+	for _, provider := range s.providers {
+		providers = append(providers, provider)
+	}
+	return providers
+}
+
+// GetProvider returns a specific OAuth provider
+func (s *OAuthProvisioningService) GetProvider(name string) (*OAuthProvider, error) {
+	provider, exists := s.providers[name]
+	if !exists {
+		return nil, fmt.Errorf("unsupported OAuth provider: %s", name)
+	}
+	return provider, nil
+}
+
+// ProvisionOAuthApp provisions a new OAuth application
+func (s *OAuthProvisioningService) ProvisionOAuthApp(projectID string, config OAuthAppConfig) (*ProvisionedOAuthApp, error) {
+	provider, err := s.GetProvider(config.Provider)
+	if err != nil {
+		return nil, err
+	}
+
+	// Validate configuration
+	if err := s.validateConfig(config, provider); err != nil {
+		return nil, err
+	}
+
+	// Generate app ID
+	appID := fmt.Sprintf("oauth_%d_%s", time.Now().Unix(), generateRandomString(8))
+
+	app := &ProvisionedOAuthApp{
+		ID:           appID,
+		Provider:     config.Provider,
+		ClientID:     config.ClientID,
+		ClientSecret: config.ClientSecret,
+		RedirectURI:  config.RedirectURI,
+		Scopes:       config.Scopes,
+		CreatedAt:    time.Now(),
+		UpdatedAt:    time.Now(),
+		IsActive:     true,
+	}
+
+	return app, nil
+}
+
+// GenerateAuthorizationURL generates OAuth authorization URL
+func (s *OAuthProvisioningService) GenerateAuthorizationURL(
+	appID string,
+	redirectURI string,
+	scopes []string,
+	state string,
+) (string, string, error) {
+	// In a real implementation, you would retrieve the app from storage
+	// For now, we'll use a mock app
+	app := &ProvisionedOAuthApp{
+		Provider:     "github", // Mock provider
+		ClientID:     "mock_client_id",
+		ClientSecret: "mock_client_secret",
+		RedirectURI:  redirectURI,
+		Scopes:       scopes,
+	}
+
+	provider, err := s.GetProvider(app.Provider)
+	if err != nil {
+		return "", "", err
+	}
+
+	finalState := state
+	if finalState == "" {
+		finalState = generateRandomString(32)
+	}
+
+	// Store flow state
+	flowState := &OAuthFlowState{
+		State:       finalState,
+		Provider:    app.Provider,
+		RedirectURI: redirectURI,
+		Scopes:      scopes,
+		ExpiresAt:   time.Now().Add(10 * time.Minute),
+	}
+
+	if provider.SupportsPKCE {
+		codeVerifier := generateCodeVerifier()
+		flowState.CodeVerifier = &codeVerifier
+	}
+
+	s.flowStates[finalState] = flowState
+
+	// Build authorization URL
+	params := url.Values{
+		"client_id":    {app.ClientID},
+		"redirect_uri": {redirectURI},
+		"scope":        {strings.Join(scopes, " ")},
+		"response_type": {"code"},
+		"state":        {finalState},
+	}
+
+	// Add PKCE parameters
+	if flowState.CodeVerifier != nil {
+		codeChallenge := generateCodeChallenge(*flowState.CodeVerifier)
+		params.Set("code_challenge", codeChallenge)
+		params.Set("code_challenge_method", "S256")
+	}
+
+	authURL := fmt.Sprintf("%s?%s", provider.AuthorizationURL, params.Encode())
+
+	return authURL, finalState, nil
+}
+
+// ExchangeCodeForToken exchanges authorization code for access token
+func (s *OAuthProvisioningService) ExchangeCodeForToken(
+	state string,
+	code string,
+	redirectURI string,
+) (*OAuthTokens, error) {
+	flowState, exists := s.flowStates[state]
+	if !exists {
+		return nil, fmt.Errorf("invalid or expired state")
+	}
+
+	// Remove used state
+	delete(s.flowStates, state)
+
+	// Check expiration
+	if time.Now().After(flowState.ExpiresAt) {
+		return nil, fmt.Errorf("authorization state has expired")
+	}
+
+	provider, err := s.GetProvider(flowState.Provider)
+	if err != nil {
+		return nil, err
+	}
+
+	// Mock app - in real implementation, retrieve from storage
+	app := &ProvisionedOAuthApp{
+		ClientID:     "mock_client_id",
+		ClientSecret: "mock_client_secret",
+	}
+
+	// Prepare token request
+	tokenData := url.Values{
+		"client_id":     {app.ClientID},
+		"client_secret": {app.ClientSecret},
+		"code":          {code},
+		"grant_type":    {"authorization_code"},
+		"redirect_uri":  {redirectURI},
+	}
+
+	// Add PKCE verifier
+	if flowState.CodeVerifier != nil {
+		tokenData.Set("code_verifier", *flowState.CodeVerifier)
+	}
+
+	// Make token request (mock implementation)
+	tokens := &OAuthTokens{
+		AccessToken: "mock_access_token",
+		TokenType:   "Bearer",
+	}
+
+	return tokens, nil
+}
+
+// validateConfig validates OAuth configuration
+func (s *OAuthProvisioningService) validateConfig(config OAuthAppConfig, provider *OAuthProvider) error {
+	if provider.ClientIDRequired && config.ClientID == "" {
+		return fmt.Errorf("%s requires a client ID", provider.DisplayName)
+	}
+
+	if provider.ClientSecretRequired && config.ClientSecret == "" {
+		return fmt.Errorf("%s requires a client secret", provider.DisplayName)
+	}
+
+	if provider.RedirectURIRequired && config.RedirectURI == "" {
+		return fmt.Errorf("%s requires a redirect URI", provider.DisplayName)
+	}
+
+	// Validate scopes
+	if config.Scopes != nil {
+		for _, scope := range config.Scopes {
+			found := false
+			for _, validScope := range provider.Scopes {
+				if scope == validScope {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return fmt.Errorf("invalid scope '%s' for %s", scope, provider.DisplayName)
+			}
+		}
+	}
+
+	return nil
+}
+
+// VaultSecretsService handles secrets management with Vault
+type VaultSecretsService struct {
+	config *VaultConfig
+	store  map[string]map[string]interface{} // Mock in-memory store
+}
+
+// NewVaultSecretsService creates a new Vault secrets service
+func NewVaultSecretsService(config *VaultConfig) *VaultSecretsService {
+	return &VaultSecretsService{
+		config: config,
+		store:  make(map[string]map[string]interface{}),
+	}
+}
+
+// Initialize initializes the Vault client
+func (s *VaultSecretsService) Initialize() error {
+	// Mock initialization - in real implementation, connect to Vault
+	return nil
+}
+
+// StoreOAuthSecrets stores OAuth application secrets
+func (s *VaultSecretsService) StoreOAuthSecrets(
+	projectID string,
+	provider string,
+	secrets map[string]interface{},
+) (string, error) {
+	path := fmt.Sprintf("projects/%s/oauth/%s", projectID, provider)
+
+	if s.store[path] == nil {
+		s.store[path] = make(map[string]interface{})
+	}
+
+	// Store secrets (mock implementation)
+	for k, v := range secrets {
+		s.store[path][k] = v
+	}
+
+	return path, nil
+}
+
+// GetOAuthSecrets retrieves OAuth application secrets
+func (s *VaultSecretsService) GetOAuthSecrets(projectID string, provider string) (map[string]interface{}, error) {
+	path := fmt.Sprintf("projects/%s/oauth/%s", projectID, provider)
+
+	secrets, exists := s.store[path]
+	if !exists {
+		return nil, fmt.Errorf("OAuth secrets not found")
+	}
+
+	return secrets, nil
+}
+
+// StoreAPIKey stores an API key
+func (s *VaultSecretsService) StoreAPIKey(
+	projectID string,
+	apiName string,
+	apiKey string,
+	metadata map[string]interface{},
+) (string, error) {
+	path := fmt.Sprintf("projects/%s/api-keys/%s", projectID, apiName)
+
+	if s.store[path] == nil {
+		s.store[path] = make(map[string]interface{})
+	}
+
+	s.store[path]["api_key"] = apiKey
+	s.store[path]["stored_at"] = time.Now().Format(time.RFC3339)
+
+	// Add metadata
+	for k, v := range metadata {
+		s.store[path][k] = v
+	}
+
+	return path, nil
+}
+
+// GetAPIKey retrieves an API key
+func (s *VaultSecretsService) GetAPIKey(projectID string, apiName string) (string, error) {
+	path := fmt.Sprintf("projects/%s/api-keys/%s", projectID, apiName)
+
+	secrets, exists := s.store[path]
+	if !exists {
+		return "", fmt.Errorf("API key not found")
+	}
+
+	apiKey, ok := secrets["api_key"].(string)
+	if !ok {
+		return "", fmt.Errorf("invalid API key format")
+	}
+
+	return apiKey, nil
+}
+
+// GetHealthStatus returns Vault health status
+func (s *VaultSecretsService) GetHealthStatus() map[string]interface{} {
+	return map[string]interface{}{
+		"status": "active",
+		"initialized": true,
+		"sealed": false,
+		"mock": true, // Indicates this is a mock implementation
+	}
+}
+
+// Utility functions
+
+func generateRandomString(length int) string {
+	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	b := make([]byte, length)
+	_, err := rand.Read(b)
+	if err != nil {
+		// Fallback to less secure method if crypto/rand fails
+		for i := range b {
+			n, _ := rand.Int(rand.Reader, big.NewInt(int64(len(charset))))
+			b[i] = charset[n.Int64()]
+		}
+	} else {
+		for i := range b {
+			b[i] = charset[b[i]%byte(len(charset))]
+		}
+	}
+	return string(b)
+}
+
+func generateCodeVerifier() string {
+	return generateRandomString(32)
+}
+
+func generateCodeChallenge(verifier string) string {
+	hash := sha256.Sum256([]byte(verifier))
+	return base64.RawURLEncoding.EncodeToString(hash[:])
+}
+
+// OAuthHelper provides high-level OAuth operations
+type OAuthHelper struct {
+	provisioningService *OAuthProvisioningService
+	vaultService        *VaultSecretsService
+	config              *VaultConfig
+}
+
+// NewOAuthHelper creates a new OAuth helper
+func NewOAuthHelper(vaultConfig *VaultConfig) *OAuthHelper {
+	return &OAuthHelper{
+		provisioningService: NewOAuthProvisioningService(),
+		vaultService:        NewVaultSecretsService(vaultConfig),
+		config:              vaultConfig,
+	}
+}
+
+// Initialize initializes the OAuth helper
+func (h *OAuthHelper) Initialize() error {
+	return h.vaultService.Initialize()
+}
+
+// ProvisionOAuthApp provisions an OAuth application
+func (h *OAuthHelper) ProvisionOAuthApp(projectID string, config OAuthAppConfig) (*ProvisionedOAuthApp, error) {
+	app, err := h.provisioningService.ProvisionOAuthApp(projectID, config)
+	if err != nil {
+		return nil, err
+	}
+
+	// Store secrets in Vault
+	secrets := map[string]interface{}{
+		"client_id":     config.ClientID,
+		"client_secret": config.ClientSecret,
+		"redirect_uri":  config.RedirectURI,
+		"scopes":        strings.Join(config.Scopes, " "),
+	}
+
+	_, err = h.vaultService.StoreOAuthSecrets(projectID, config.Provider, secrets)
+	if err != nil {
+		return nil, fmt.Errorf("failed to store secrets: %w", err)
+	}
+
+	return app, nil
+}
+
+// GenerateAuthorizationURL generates OAuth authorization URL
+func (h *OAuthHelper) GenerateAuthorizationURL(
+	appID string,
+	redirectURI string,
+	scopes []string,
+	state string,
+) (string, string, error) {
+	return h.provisioningService.GenerateAuthorizationURL(appID, redirectURI, scopes, state)
+}
+
+// HandleCallback handles OAuth callback
+func (h *OAuthHelper) HandleCallback(
+	state string,
+	code string,
+	redirectURI string,
+) (*OAuthTokens, error) {
+	return h.provisioningService.ExchangeCodeForToken(state, code, redirectURI)
+}
+
+// GetSupportedProviders returns supported OAuth providers
+func (h *OAuthHelper) GetSupportedProviders() []*OAuthProvider {
+	return h.provisioningService.GetSupportedProviders()
+}
+
+// GetStats returns OAuth helper statistics
+func (h *OAuthHelper) GetStats() map[string]interface{} {
+	return map[string]interface{}{
+		"supported_providers": len(h.provisioningService.GetSupportedProviders()),
+		"vault_status": h.vaultService.GetHealthStatus(),
+	}
+}

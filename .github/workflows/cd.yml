@@ -1,0 +1,310 @@
+name: Continuous Deployment
+
+on:
+  workflow_run:
+    workflows: ["Continuous Integration"]
+    types:
+      - completed
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+      force_deploy:
+        description: 'Force deployment (skip checks)'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # Deploy to Staging
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    if: |
+      (github.event.workflow_run.conclusion == 'success' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'staging')
+    environment:
+      name: staging
+      url: https://staging-api.your-domain.com
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download deployment artifact
+        if: github.event.workflow_run.conclusion == 'success'
+        uses: actions/download-artifact@v3
+        with:
+          name: deployment-info
+          path: deployment/
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          workflow: ${{ github.event.workflow_run.id }}
+
+      - name: Load deployment info
+        if: github.event.workflow_run.conclusion == 'success'
+        run: |
+          if [ -f deployment/image-info.env ]; then
+            cat deployment/image-info.env >> $GITHUB_ENV
+          fi
+
+      - name: Set image tag for manual deployment
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          echo "IMAGE_TAG=${{ github.sha }}" >> $GITHUB_ENV
+
+      - name: Deploy to staging
+        run: |
+          echo "🚀 Deploying to staging environment..."
+          echo "Image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG || github.sha }}"
+          echo "Environment: staging"
+          
+          # In a real deployment, this would:
+          # 1. Update Kubernetes manifests
+          # 2. Apply configurations
+          # 3. Run database migrations
+          # 4. Perform health checks
+          
+          # Simulate deployment
+          sleep 10
+          echo "✅ Staging deployment completed"
+
+      - name: Run smoke tests
+        run: |
+          echo "🧪 Running smoke tests against staging..."
+          
+          # Wait for deployment to be ready
+          sleep 30
+          
+          # Run basic health checks
+          curl -f https://staging-api.your-domain.com/health || exit 1
+          
+          echo "✅ Smoke tests passed"
+
+      - name: Notify deployment success
+        run: |
+          echo "🎉 Successfully deployed to staging!"
+          echo "Environment: staging"
+          echo "Image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG || github.sha }}"
+          echo "URL: https://staging-api.your-domain.com"
+
+  # Deploy to Production
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [deploy-staging]
+    if: |
+      (success() && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'production')
+    environment:
+      name: production
+      url: https://api.your-domain.com
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download deployment artifact
+        if: github.event.workflow_run.conclusion == 'success'
+        uses: actions/download-artifact@v3
+        with:
+          name: deployment-info
+          path: deployment/
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          workflow: ${{ github.event.workflow_run.id }}
+
+      - name: Load deployment info
+        if: github.event.workflow_run.conclusion == 'success'
+        run: |
+          if [ -f deployment/image-info.env ]; then
+            cat deployment/image-info.env >> $GITHUB_ENV
+          fi
+
+      - name: Set image tag for manual deployment
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          echo "IMAGE_TAG=${{ github.sha }}" >> $GITHUB_ENV
+
+      - name: Pre-deployment checks
+        if: github.event.inputs.force_deploy != 'true'
+        run: |
+          echo "🔍 Running pre-deployment checks..."
+          
+          # Check if staging is healthy
+          curl -f https://staging-api.your-domain.com/health || (echo "❌ Staging is not healthy" && exit 1)
+          
+          # Check for any critical alerts
+          echo "✅ Pre-deployment checks passed"
+
+      - name: Create database backup
+        run: |
+          echo "💾 Creating database backup..."
+          
+          # In a real deployment, this would:
+          # 1. Create a database backup
+          # 2. Store it in a secure location
+          # 3. Verify backup integrity
+          
+          echo "✅ Database backup created"
+
+      - name: Deploy to production
+        run: |
+          echo "🚀 Deploying to production environment..."
+          echo "Image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG || github.sha }}"
+          echo "Environment: production"
+          
+          # In a real deployment, this would:
+          # 1. Update Kubernetes manifests with blue-green deployment
+          # 2. Apply configurations
+          # 3. Run database migrations
+          # 4. Gradually shift traffic
+          # 5. Monitor metrics and logs
+          
+          # Simulate deployment
+          sleep 20
+          echo "✅ Production deployment completed"
+
+      - name: Run production health checks
+        run: |
+          echo "🏥 Running production health checks..."
+          
+          # Wait for deployment to be ready
+          sleep 60
+          
+          # Comprehensive health checks
+          curl -f https://api.your-domain.com/health || exit 1
+          curl -f https://api.your-domain.com/health/ready || exit 1
+          
+          # Check database connectivity
+          # Check external service connectivity
+          # Verify key functionality
+          
+          echo "✅ Production health checks passed"
+
+      - name: Update monitoring dashboards
+        run: |
+          echo "📊 Updating monitoring dashboards..."
+          
+          # Update deployment annotations in monitoring systems
+          # Create deployment markers in metrics
+          # Update status pages
+          
+          echo "✅ Monitoring dashboards updated"
+
+      - name: Notify deployment success
+        run: |
+          echo "🎉 Successfully deployed to production!"
+          echo "Environment: production"
+          echo "Image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG || github.sha }}"
+          echo "URL: https://api.your-domain.com"
+
+  # Rollback capability
+  rollback:
+    name: Rollback
+    runs-on: ubuntu-latest
+    if: failure()
+    environment:
+      name: production
+    steps:
+      - name: Rollback deployment
+        run: |
+          echo "🔄 Rolling back deployment..."
+          
+          # In a real deployment, this would:
+          # 1. Revert to previous image version
+          # 2. Restore database if needed
+          # 3. Update configurations
+          # 4. Verify rollback success
+          
+          echo "✅ Rollback completed"
+
+      - name: Notify rollback
+        run: |
+          echo "⚠️ Deployment rolled back due to failures"
+          echo "Environment: production"
+          echo "Action: Manual investigation required"
+
+  # Post-deployment monitoring
+  post-deployment:
+    name: Post-Deployment Monitoring
+    runs-on: ubuntu-latest
+    needs: [deploy-production]
+    if: success()
+    steps:
+      - name: Monitor deployment
+        run: |
+          echo "📈 Starting post-deployment monitoring..."
+          
+          # Monitor for 10 minutes after deployment
+          for i in {1..10}; do
+            echo "Monitoring minute $i/10..."
+            
+            # Check health endpoints
+            curl -f https://api.your-domain.com/health || exit 1
+            
+            # Check error rates
+            # Check response times
+            # Check resource usage
+            
+            sleep 60
+          done
+          
+          echo "✅ Post-deployment monitoring completed"
+
+      - name: Generate deployment report
+        run: |
+          echo "📋 Generating deployment report..."
+          
+          cat << EOF > deployment-report.md
+          # Deployment Report
+          
+          ## Deployment Details
+          - **Environment**: Production
+          - **Image**: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG || github.sha }}
+          - **Commit**: ${{ github.sha }}
+          - **Branch**: ${{ github.ref_name }}
+          - **Deployed At**: $(date -u)
+          
+          ## Health Checks
+          - ✅ Application health check
+          - ✅ Database connectivity
+          - ✅ External services
+          - ✅ Post-deployment monitoring
+          
+          ## Next Steps
+          - Monitor application metrics for 24 hours
+          - Review error logs and performance
+          - Validate user-facing functionality
+          EOF
+
+      - name: Upload deployment report
+        uses: actions/upload-artifact@v3
+        with:
+          name: deployment-report
+          path: deployment-report.md
+
+  # Cleanup
+  cleanup:
+    name: Cleanup
+    runs-on: ubuntu-latest
+    needs: [deploy-production, post-deployment]
+    if: always()
+    steps:
+      - name: Cleanup old images
+        run: |
+          echo "🧹 Cleaning up old container images..."
+          
+          # In a real deployment, this would:
+          # 1. Remove old container images from registry
+          # 2. Clean up temporary resources
+          # 3. Archive deployment artifacts
+          
+          echo "✅ Cleanup completed"

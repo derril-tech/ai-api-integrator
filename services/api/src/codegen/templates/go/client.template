@@ -1,0 +1,285 @@
+// Package {{entityName | lower}} provides a Go client for the {{entityName}} API.
+//
+// This package offers a comprehensive, type-safe client with automatic
+// retries, rate limiting, and pagination support.
+package {{entityName | lower}}
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/hashicorp/go-retryablehttp"
+)
+
+// Client represents the {{entityName}} API client.
+type Client struct {
+	baseURL    string
+	httpClient *retryablehttp.Client
+	apiKey     string
+	userAgent  string
+}
+
+// Config holds client configuration options.
+type Config struct {
+	// APIKey is the authentication key for the API
+	APIKey string
+
+	// BaseURL is the base URL for the API (default: https://api.{{entityName | lower}}.com/v1)
+	BaseURL string
+
+	// Timeout is the request timeout duration (default: 30s)
+	Timeout time.Duration
+
+	// RetryMax is the maximum number of retries (default: 3)
+	RetryMax int
+
+	// RetryWaitMin is the minimum time to wait between retries (default: 1s)
+	RetryWaitMin time.Duration
+
+	// RetryWaitMax is the maximum time to wait between retries (default: 30s)
+	RetryWaitMax time.Duration
+
+	// UserAgent is the user agent string sent with requests
+	UserAgent string
+}
+
+// DefaultConfig returns a default configuration.
+func DefaultConfig() *Config {
+	return &Config{
+		BaseURL:      "https://api.{{entityName | lower}}.com/v1",
+		Timeout:      30 * time.Second,
+		RetryMax:     3,
+		RetryWaitMin: 1 * time.Second,
+		RetryWaitMax: 30 * time.Second,
+		UserAgent:    "{{entityName}}-go/1.0.0",
+	}
+}
+
+// NewClient creates a new API client with the provided API key.
+func NewClient(apiKey string, config *Config) (*Client, error) {
+	if apiKey == "" {
+		return nil, fmt.Errorf("API key is required")
+	}
+
+	if config == nil {
+		config = DefaultConfig()
+	}
+
+	if config.APIKey == "" {
+		config.APIKey = apiKey
+	}
+
+	// Configure retryable HTTP client
+	retryClient := retryablehttp.NewClient()
+	retryClient.RetryMax = config.RetryMax
+	retryClient.RetryWaitMin = config.RetryWaitMin
+	retryClient.RetryWaitMax = config.RetryWaitMax
+	retryClient.HTTPClient.Timeout = config.Timeout
+
+	// Set retry conditions
+	retryClient.CheckRetry = func(ctx context.Context, resp *http.Response, err error) (bool, error) {
+		if err != nil {
+			return true, err
+		}
+		if resp.StatusCode >= 500 {
+			return true, nil
+		}
+		if resp.StatusCode == 429 { // Too Many Requests
+			return true, nil
+		}
+		return false, nil
+	}
+
+	client := &Client{
+		baseURL:    strings.TrimSuffix(config.BaseURL, "/"),
+		httpClient: retryClient,
+		apiKey:     config.APIKey,
+		userAgent:  config.UserAgent,
+	}
+
+	return client, nil
+}
+
+// makeRequest performs an HTTP request with authentication and error handling.
+func (c *Client) makeRequest(ctx context.Context, method, path string, body interface{}, params url.Values) (*http.Response, error) {
+	// Build full URL
+	fullURL := c.baseURL + path
+	if params != nil && len(params) > 0 {
+		fullURL += "?" + params.Encode()
+	}
+
+	// Prepare request body
+	var bodyReader io.Reader
+	if body != nil {
+		bodyBytes, err := json.Marshal(body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal request body: %w", err)
+		}
+		bodyReader = bytes.NewReader(bodyBytes)
+	}
+
+	// Create request
+	req, err := retryablehttp.NewRequestWithContext(ctx, method, fullURL, bodyReader)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	// Set headers
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", c.userAgent)
+
+	// Execute request
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+
+	// Check for HTTP errors
+	if resp.StatusCode >= 400 {
+		defer resp.Body.Close()
+		bodyBytes, _ := io.ReadAll(resp.Body)
+
+		var apiError APIError
+		if err := json.Unmarshal(bodyBytes, &apiError); err != nil {
+			// If we can't parse the error, create a generic one
+			apiError = APIError{
+				Type:    "api_error",
+				Message: fmt.Sprintf("HTTP %d: %s", resp.StatusCode, string(bodyBytes)),
+			}
+		}
+
+		switch resp.StatusCode {
+		case 401:
+			return nil, &AuthenticationError{APIError: apiError}
+		case 403:
+			return nil, &PermissionError{APIError: apiError}
+		case 404:
+			return nil, &NotFoundError{APIError: apiError}
+		case 429:
+			return nil, &RateLimitError{APIError: apiError}
+		case 422:
+			return nil, &ValidationError{APIError: apiError}
+		default:
+			if resp.StatusCode >= 500 {
+				return nil, &ServerError{APIError: apiError}
+			}
+			return nil, &ClientError{APIError: apiError}
+		}
+	}
+
+	return resp, nil
+}
+
+// API Methods - these will be generated based on the OpenAPI spec
+{% for endpoint in endpoints %}
+{% if endpoint.method == 'GET' and endpoint.path.endswith('s') %}
+// List{{ endpoint.path | replace('/', '') | title | replace('{', '') | replace('}', '') }} retrieves a paginated list of {{ endpoint.path | replace('/', ' ') | title }}.
+func (c *Client) List{{ endpoint.path | replace('/', '') | title | replace('{', '') | replace('}', '') }}(ctx context.Context, opts *ListOptions) (*ListResponse[{{ endpoint.path | replace('/', '') | title }}], error) {
+	params := url.Values{}
+	if opts != nil {
+		if opts.Limit > 0 {
+			params.Set("limit", strconv.Itoa(opts.Limit))
+		}
+		if opts.After != "" {
+			params.Set("after", opts.After)
+		}
+		if opts.Before != "" {
+			params.Set("before", opts.Before)
+		}
+	}
+
+	resp, err := c.makeRequest(ctx, "GET", "{{ endpoint.path }}", nil, params)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var result ListResponse[{{ endpoint.path | replace('/', '') | title }}]
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return &result, nil
+}
+
+{% elif endpoint.method == 'GET' %}
+// Get{{ endpoint.path | replace('/', '') | title | replace('{', '') | replace('}', '') }} retrieves a single {{ endpoint.path | replace('/', ' ') | title }}.
+func (c *Client) Get{{ endpoint.path | replace('/', '') | title | replace('{', '') | replace('}', '') }}(ctx context.Context, {{ endpoint.path | extract_path_params | join(', ') }} string) (*{{ endpoint.path | replace('/', '') | title }}, error) {
+	path := fmt.Sprintf("{{ endpoint.path }}", {{ endpoint.path | extract_path_params | join(', ') }})
+
+	resp, err := c.makeRequest(ctx, "GET", path, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var result {{ endpoint.path | replace('/', '') | title }}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return &result, nil
+}
+
+{% elif endpoint.method == 'POST' %}
+// Create{{ endpoint.path | replace('/', '') | title | replace('{', '') | replace('}', '') }} creates a new {{ endpoint.path | replace('/', ' ') | title }}.
+func (c *Client) Create{{ endpoint.path | replace('/', '') | title | replace('{', '') | replace('}', '') }}(ctx context.Context, req *Create{{ endpoint.path | replace('/', '') | title | replace('{', '') | replace('}', '') }}Request) (*{{ endpoint.path | replace('/', '') | title }}, error) {
+	resp, err := c.makeRequest(ctx, "POST", "{{ endpoint.path }}", req, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var result {{ endpoint.path | replace('/', '') | title }}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return &result, nil
+}
+
+{% elif endpoint.method == 'PUT' %}
+// Update{{ endpoint.path | replace('/', '') | title | replace('{', '') | replace('}', '') }} updates an existing {{ endpoint.path | replace('/', ' ') | title }}.
+func (c *Client) Update{{ endpoint.path | replace('/', '') | title | replace('{', '') | replace('}', '') }}(ctx context.Context, {{ endpoint.path | extract_path_params | join(', ') }} string, req *Update{{ endpoint.path | replace('/', '') | title | replace('{', '') | replace('}', '') }}Request) (*{{ endpoint.path | replace('/', '') | title }}, error) {
+	path := fmt.Sprintf("{{ endpoint.path }}", {{ endpoint.path | extract_path_params | join(', ') }})
+
+	resp, err := c.makeRequest(ctx, "PUT", path, req, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var result {{ endpoint.path | replace('/', '') | title }}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return &result, nil
+}
+
+{% elif endpoint.method == 'DELETE' %}
+// Delete{{ endpoint.path | replace('/', '') | title | replace('{', '') | replace('}', '') }} deletes a {{ endpoint.path | replace('/', ' ') | title }}.
+func (c *Client) Delete{{ endpoint.path | replace('/', '') | title | replace('{', '') | replace('}', '') }}(ctx context.Context, {{ endpoint.path | extract_path_params | join(', ') }} string) error {
+	path := fmt.Sprintf("{{ endpoint.path }}", {{ endpoint.path | extract_path_params | join(', ') }})
+
+	resp, err := c.makeRequest(ctx, "DELETE", path, nil, nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	return nil
+}
+
+{% endif %}
+{% endfor %}

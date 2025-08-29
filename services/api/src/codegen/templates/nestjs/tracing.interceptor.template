@@ -1,0 +1,32 @@
+import { Injectable, NestInterceptor, ExecutionContext, CallHandler } from '@nestjs/common';
+import { Observable } from 'rxjs';
+import { tap } from 'rxjs/operators';
+import { v4 as uuidv4 } from 'uuid';
+import { LoggerService } from '../services/logger.service';
+
+@Injectable()
+export class TracingInterceptor implements NestInterceptor {
+  constructor(private readonly logger: LoggerService) {}
+
+  intercept(context: ExecutionContext, next: CallHandler): Observable<any> {
+    const request = context.switchToHttp().getRequest();
+    const traceId = request.headers['x-trace-id'] || uuidv4();
+
+    // Add trace ID to request for use in services
+    request.traceId = traceId;
+
+    this.logger.log(
+      \`Trace started: \${traceId}\`,
+      'TracingInterceptor'
+    );
+
+    return next.handle().pipe(
+      tap(() => {
+        this.logger.log(
+          \`Trace completed: \${traceId}\`,
+          'TracingInterceptor'
+        );
+      })
+    );
+  }
+}

@@ -1,0 +1,238 @@
+// Package {{entityName | lower}} contains all data models for the {{entityName}} API.
+package {{entityName | lower}}
+
+import (
+	"time"
+)
+
+// BaseResponse contains common fields present in most API responses.
+type BaseResponse struct {
+	ID        string    `json:"id"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt,omitempty"`
+}
+
+// ListOptions contains common query parameters for list endpoints.
+type ListOptions struct {
+	// Limit specifies the maximum number of items to return (default: 20, max: 100)
+	Limit int `json:"-"`
+
+	// After is the cursor for forward pagination
+	After string `json:"-"`
+
+	// Before is the cursor for backward pagination
+	Before string `json:"-"`
+
+	// Page is the page number for offset-based pagination
+	Page int `json:"-"`
+}
+
+// ListResponse wraps paginated list responses.
+type ListResponse[T any] struct {
+	Data       []T           `json:"data"`
+	Meta       ListMeta     `json:"meta"`
+	Pagination *Pagination  `json:"pagination,omitempty"`
+}
+
+// ListMeta contains metadata about the list response.
+type ListMeta struct {
+	Total       int  `json:"total"`
+	Count       int  `json:"count"`
+	HasMore     bool `json:"hasMore"`
+	NextCursor  *string `json:"nextCursor,omitempty"`
+	PrevCursor  *string `json:"prevCursor,omitempty"`
+}
+
+// Pagination contains pagination information for offset-based pagination.
+type Pagination struct {
+	Page        int `json:"page"`
+	Limit       int `json:"limit"`
+	TotalPages  int `json:"totalPages"`
+	TotalItems  int `json:"totalItems"`
+	HasNext     bool `json:"hasNext"`
+	HasPrev     bool `json:"hasPrev"`
+}
+
+// APIError represents an error returned by the API.
+type APIError struct {
+	Type    string                 `json:"type"`
+	Message string                 `json:"message"`
+	Code    string                 `json:"code,omitempty"`
+	Details map[string]interface{} `json:"details,omitempty"`
+	Field   string                 `json:"field,omitempty"`
+}
+
+func (e APIError) Error() string {
+	if e.Field != "" {
+		return fmt.Sprintf("%s: %s (field: %s)", e.Type, e.Message, e.Field)
+	}
+	return fmt.Sprintf("%s: %s", e.Type, e.Message)
+}
+
+// Specific error types
+type AuthenticationError struct{ APIError }
+type PermissionError struct{ APIError }
+type NotFoundError struct{ APIError }
+type RateLimitError struct{ APIError }
+type ValidationError struct{ APIError }
+type ServerError struct{ APIError }
+type ClientError struct{ APIError }
+
+// Error constructors
+func NewAuthenticationError(message string) *AuthenticationError {
+	return &AuthenticationError{
+		APIError: APIError{Type: "authentication_error", Message: message},
+	}
+}
+
+func NewPermissionError(message string) *PermissionError {
+	return &PermissionError{
+		APIError: APIError{Type: "permission_error", Message: message},
+	}
+}
+
+func NewNotFoundError(message string) *NotFoundError {
+	return &NotFoundError{
+		APIError: APIError{Type: "not_found_error", Message: message},
+	}
+}
+
+func NewRateLimitError(message string) *RateLimitError {
+	return &RateLimitError{
+		APIError: APIError{Type: "rate_limit_error", Message: message},
+	}
+}
+
+func NewValidationError(message string, field string) *ValidationError {
+	return &ValidationError{
+		APIError: APIError{Type: "validation_error", Message: message, Field: field},
+	}
+}
+
+func NewServerError(message string) *ServerError {
+	return &ServerError{
+		APIError: APIError{Type: "server_error", Message: message},
+	}
+}
+
+func NewClientError(message string) *ClientError {
+	return &ClientError{
+		APIError: APIError{Type: "client_error", Message: message},
+	}
+}
+
+// Generate models from OpenAPI spec
+{% for model in models %}
+// {{ model.name }} represents a {{ model.description or model.name }} in the API.
+type {{ model.name }} struct {
+	BaseResponse
+
+	{% for field in model.fields %}
+	{% if field.required %}
+	{{ field.name | pascal_case }} {{ field.type | go_type }} `json:"{{ field.name | snake_case }}{% if field.required %}{% else %},omitempty{% endif %}"`
+	{% else %}
+	{{ field.name | pascal_case }} *{{ field.type | go_type }} `json:"{{ field.name | snake_case }},omitempty"`
+	{% endif %}
+	{% endfor %}
+}
+
+{% if model.example %}
+// Example{{ model.name }} returns an example {{ model.name }} instance.
+func Example{{ model.name }}() *{{ model.name }} {
+	return &{{ model.name }}{
+		// Example values would be populated here based on the schema
+	}
+}
+{% endif %}
+
+{% endfor %}
+
+// Request models for API operations
+{% for endpoint in endpoints %}
+{% if endpoint.method in ['POST', 'PUT'] and endpoint.requestBody %}
+// Create{{ endpoint.path | replace('/', '') | title | replace('{', '') | replace('}', '') }}Request represents the request payload for creating/updating a {{ endpoint.path | replace('/', ' ') | title }}.
+type Create{{ endpoint.path | replace('/', '') | title | replace('{', '') | replace('}', '') }}Request struct {
+	{% if endpoint.requestBody.schema %}
+	{% for field in endpoint.requestBody.schema.properties %}
+	{% if field.name in endpoint.requestBody.schema.required %}
+	{{ field.name | pascal_case }} {{ field.type | go_type }} `json:"{{ field.name | snake_case }}"`
+	{% else %}
+	{{ field.name | pascal_case }} *{{ field.type | go_type }} `json:"{{ field.name | snake_case }},omitempty"`
+	{% endif %}
+	{% endfor %}
+	{% endif %}
+}
+
+{% if endpoint.requestBody.example %}
+// ExampleCreate{{ endpoint.path | replace('/', '') | title | replace('{', '') | replace('}', '') }}Request returns an example request.
+func ExampleCreate{{ endpoint.path | replace('/', '') | title | replace('{', '') | replace('}', '') }}Request() *Create{{ endpoint.path | replace('/', '') | title | replace('{', '') | replace('}', '') }}Request {
+	return &Create{{ endpoint.path | replace('/', '') | title | replace('{', '') | replace('}', '') }}Request{
+		// Example values would be populated here
+	}
+}
+{% endif %}
+
+{% endif %}
+{% endfor %}
+
+// Enums from the spec
+{% for model in models %}
+{% if model.enum %}
+// {{ model.name }} represents the possible values for {{ model.name | snake_case }}.
+type {{ model.name }} string
+
+// {{ model.name }} constants
+const (
+	{% for value in model.enum %}
+	{{ model.name }}{{ value | pascal_case }} {{ model.name }} = "{{ value }}"
+	{% endfor %}
+)
+
+// String returns the string representation of the enum value.
+func (e {{ model.name }}) String() string {
+	return string(e)
+}
+
+// IsValid checks if the enum value is valid.
+func (e {{ model.name }}) IsValid() bool {
+	switch e {
+	{% for value in model.enum %}
+	case {{ model.name }}{{ value | pascal_case }}:
+		return true
+	{% endfor %}
+	default:
+		return false
+	}
+}
+
+// All{{ model.name }}Values returns all possible values for the enum.
+func All{{ model.name }}Values() []{{ model.name }} {
+	return []{{ model.name }}{
+		{% for value in model.enum %}
+		{{ model.name }}{{ value | pascal_case }},
+		{% endfor %}
+	}
+}
+{% endif %}
+{% endfor %}
+
+// Utility types
+type JSON map[string]interface{}
+
+type Timestamp time.Time
+
+// MarshalJSON implements custom JSON marshaling for Timestamp.
+func (t Timestamp) MarshalJSON() ([]byte, error) {
+	return []byte(fmt.Sprintf("\"%s\"", time.Time(t).Format(time.RFC3339))), nil
+}
+
+// UnmarshalJSON implements custom JSON unmarshaling for Timestamp.
+func (t *Timestamp) UnmarshalJSON(data []byte) error {
+	str := strings.Trim(string(data), "\"")
+	parsed, err := time.Parse(time.RFC3339, str)
+	if err != nil {
+		return err
+	}
+	*t = Timestamp(parsed)
+	return nil
+}

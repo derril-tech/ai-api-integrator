@@ -1,0 +1,293 @@
+// AsyncAPI Streaming Client for {{entityName}}
+import WebSocket from 'ws';
+import { EventEmitter } from 'events';
+
+export interface StreamingClientConfig {
+  url: string;
+  apiKey?: string;
+  reconnectInterval?: number;
+  maxReconnects?: number;
+  heartbeatInterval?: number;
+}
+
+export interface StreamingMessage {
+  id?: string;
+  channel: string;
+  type: string;
+  data: any;
+  timestamp?: number;
+}
+
+export class AsyncAPIStreamingClient extends EventEmitter {
+  private ws?: WebSocket;
+  private config: StreamingClientConfig;
+  private reconnectAttempts = 0;
+  private reconnectTimer?: NodeJS.Timeout;
+  private heartbeatTimer?: NodeJS.Timeout;
+  private subscriptions = new Set<string>();
+  private connected = false;
+
+  constructor(config: StreamingClientConfig) {
+    super();
+    this.config = {
+      reconnectInterval: 5000,
+      maxReconnects: 10,
+      heartbeatInterval: 30000,
+      ...config,
+    };
+  }
+
+  /**
+   * Connect to the streaming service
+   */
+  async connect(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      try {
+        const headers: Record<string, string> = {};
+        if (this.config.apiKey) {
+          headers['Authorization'] = `Bearer ${this.config.apiKey}`;
+        }
+
+        this.ws = new WebSocket(this.config.url, {
+          headers,
+        });
+
+        this.ws.on('open', () => {
+          this.connected = true;
+          this.reconnectAttempts = 0;
+          this.startHeartbeat();
+          this.emit('connected');
+          resolve();
+        });
+
+        this.ws.on('message', (data: Buffer) => {
+          try {
+            const message = JSON.parse(data.toString());
+            this.handleMessage(message);
+          } catch (error) {
+            this.emit('error', new Error(`Failed to parse message: ${error.message}`));
+          }
+        });
+
+        this.ws.on('error', (error) => {
+          this.emit('error', error);
+          reject(error);
+        });
+
+        this.ws.on('close', (code, reason) => {
+          this.connected = false;
+          this.stopHeartbeat();
+          this.emit('disconnected', code, reason);
+          this.handleReconnect();
+        });
+
+      } catch (error) {
+        reject(error);
+      }
+    });
+  }
+
+  /**
+   * Disconnect from the streaming service
+   */
+  async disconnect(): Promise<void> {
+    this.connected = false;
+    this.stopHeartbeat();
+
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+    }
+
+    if (this.ws) {
+      this.ws.close();
+      this.ws = undefined;
+    }
+
+    // Clear subscriptions
+    this.subscriptions.clear();
+  }
+
+  /**
+   * Subscribe to a channel
+   */
+  subscribe(channel: string): void {
+    if (!this.connected || !this.ws) {
+      throw new Error('Not connected to streaming service');
+    }
+
+    this.subscriptions.add(channel);
+
+    const subscriptionMessage = {
+      type: 'subscribe',
+      channel: channel,
+      id: `sub_${Date.now()}`,
+    };
+
+    this.ws.send(JSON.stringify(subscriptionMessage));
+    this.emit('subscribed', channel);
+  }
+
+  /**
+   * Unsubscribe from a channel
+   */
+  unsubscribe(channel: string): void {
+    if (!this.connected || !this.ws) {
+      throw new Error('Not connected to streaming service');
+    }
+
+    this.subscriptions.delete(channel);
+
+    const unsubscribeMessage = {
+      type: 'unsubscribe',
+      channel: channel,
+      id: `unsub_${Date.now()}`,
+    };
+
+    this.ws.send(JSON.stringify(unsubscribeMessage));
+    this.emit('unsubscribed', channel);
+  }
+
+  /**
+   * Send a message to a channel
+   */
+  publish(channel: string, data: any): void {
+    if (!this.connected || !this.ws) {
+      throw new Error('Not connected to streaming service');
+    }
+
+    const message = {
+      type: 'publish',
+      channel: channel,
+      data: data,
+      id: `pub_${Date.now()}`,
+      timestamp: Date.now(),
+    };
+
+    this.ws.send(JSON.stringify(message));
+  }
+
+  /**
+   * Send a raw message
+   */
+  send(data: any): void {
+    if (!this.connected || !this.ws) {
+      throw new Error('Not connected to streaming service');
+    }
+
+    this.ws.send(JSON.stringify(data));
+  }
+
+  /**
+   * Check if connected
+   */
+  isConnected(): boolean {
+    return this.connected;
+  }
+
+  /**
+   * Get active subscriptions
+   */
+  getSubscriptions(): string[] {
+    return Array.from(this.subscriptions);
+  }
+
+  private handleMessage(message: StreamingMessage): void {
+    // Emit general message event
+    this.emit('message', message);
+
+    // Emit channel-specific event
+    if (message.channel) {
+      this.emit(`message:${message.channel}`, message);
+    }
+
+    // Emit type-specific event
+    if (message.type) {
+      this.emit(message.type, message);
+    }
+
+    // Handle system messages
+    if (message.type === 'heartbeat') {
+      this.handleHeartbeat(message);
+    } else if (message.type === 'error') {
+      this.emit('streamError', message.data);
+    }
+  }
+
+  private handleHeartbeat(message: StreamingMessage): void {
+    // Respond to heartbeat if required
+    if (this.ws) {
+      const response = {
+        type: 'heartbeat_response',
+        timestamp: Date.now(),
+      };
+      this.ws.send(JSON.stringify(response));
+    }
+  }
+
+  private startHeartbeat(): void {
+    if (this.config.heartbeatInterval) {
+      this.heartbeatTimer = setInterval(() => {
+        if (this.connected && this.ws) {
+          const heartbeat = {
+            type: 'heartbeat',
+            timestamp: Date.now(),
+          };
+          this.ws.send(JSON.stringify(heartbeat));
+        }
+      }, this.config.heartbeatInterval);
+    }
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = undefined;
+    }
+  }
+
+  private handleReconnect(): void {
+    if (!this.config.maxReconnects || this.reconnectAttempts >= this.config.maxReconnects) {
+      this.emit('maxReconnectsReached');
+      return;
+    }
+
+    this.reconnectAttempts++;
+    const delay = (this.config.reconnectInterval || 5000) * Math.pow(1.5, this.reconnectAttempts - 1);
+
+    this.emit('reconnecting', this.reconnectAttempts, delay);
+
+    this.reconnectTimer = setTimeout(() => {
+      this.connect().catch(error => {
+        console.error('Reconnection failed:', error);
+      });
+    }, delay);
+  }
+}
+
+// Utility functions for AsyncAPI patterns
+export function createWebSocketClient(url: string, apiKey?: string): AsyncAPIStreamingClient {
+  return new AsyncAPIStreamingClient({
+    url,
+    apiKey,
+    reconnectInterval: 5000,
+    maxReconnects: 10,
+  });
+}
+
+export function createMQTTClient(brokerUrl: string, clientId: string, apiKey?: string): AsyncAPIStreamingClient {
+  // MQTT implementation would go here
+  // For now, return WebSocket client as fallback
+  return new AsyncAPIStreamingClient({
+    url: brokerUrl,
+    apiKey,
+  });
+}
+
+export function createKafkaClient(brokerUrl: string, groupId: string, apiKey?: string): AsyncAPIStreamingClient {
+  // Kafka implementation would go here
+  // For now, return WebSocket client as fallback
+  return new AsyncAPIStreamingClient({
+    url: brokerUrl,
+    apiKey,
+  });
+}

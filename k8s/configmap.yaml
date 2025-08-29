@@ -1,0 +1,164 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: api-config
+  namespace: ai-api-integrator
+data:
+  NODE_ENV: "production"
+  PORT: "3001"
+  LOG_LEVEL: "info"
+  LOG_FORMAT: "json"
+  
+  # Database configuration (non-sensitive)
+  DATABASE_HOST: "postgres-service"
+  DATABASE_PORT: "5432"
+  DATABASE_NAME: "ai_api_integrator"
+  DATABASE_SSL: "true"
+  DATABASE_POOL_SIZE: "20"
+  
+  # Redis configuration
+  REDIS_HOST: "redis-service"
+  REDIS_PORT: "6379"
+  REDIS_DB: "0"
+  REDIS_TTL: "3600"
+  
+  # NATS configuration
+  NATS_URL: "nats://nats-service:4222"
+  
+  # JWT configuration (non-sensitive)
+  JWT_EXPIRES_IN: "15m"
+  JWT_REFRESH_EXPIRES_IN: "7d"
+  
+  # OAuth callback URLs
+  GOOGLE_CALLBACK_URL: "https://api.your-domain.com/auth/google/callback"
+  GITHUB_CALLBACK_URL: "https://api.your-domain.com/auth/github/callback"
+  
+  # S3 configuration (non-sensitive)
+  AWS_REGION: "us-east-1"
+  S3_BUCKET_NAME: "ai-api-integrator-storage"
+  
+  # Email configuration (non-sensitive)
+  SMTP_HOST: "smtp.your-email-provider.com"
+  SMTP_PORT: "587"
+  SMTP_SECURE: "false"
+  FROM_EMAIL: "noreply@your-domain.com"
+  FROM_NAME: "AI API Integrator"
+  
+  # Temporal configuration
+  TEMPORAL_NAMESPACE: "ai-api-integrator"
+  TEMPORAL_TASK_QUEUE: "flow-execution"
+  
+  # Feature flags
+  FEATURE_RAG_INFERENCE: "true"
+  FEATURE_TEMPORAL_WORKFLOWS: "true"
+  FEATURE_OAUTH_PROVIDERS: "true"
+  FEATURE_MAGIC_LINKS: "true"
+  FEATURE_PARTNER_SHARING: "true"
+  FEATURE_ADVANCED_PAGINATION: "true"
+  FEATURE_ADVANCED_AUTH: "true"
+  FEATURE_LARGE_SPEC_OPTIMIZATION: "true"
+  
+  # Security
+  CORS_ORIGIN: "https://your-domain.com"
+  CORS_CREDENTIALS: "true"
+  HELMET_ENABLED: "true"
+  CSRF_PROTECTION_ENABLED: "true"
+  
+  # Performance
+  RATE_LIMIT_WINDOW_MS: "900000"
+  RATE_LIMIT_MAX_REQUESTS: "100"
+  HTTP_TIMEOUT: "30000"
+  HTTP_RETRIES: "3"
+  
+  # Health checks
+  HEALTH_CHECK_ENABLED: "true"
+  HEALTH_CHECK_PATH: "/health"
+  HEALTH_CHECK_TIMEOUT: "5000"
+  
+  # Monitoring
+  PROMETHEUS_METRICS_ENABLED: "true"
+  PROMETHEUS_METRICS_PORT: "9090"
+  PROMETHEUS_METRICS_PATH: "/metrics"
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: api-config
+  namespace: ai-api-integrator-staging
+data:
+  NODE_ENV: "staging"
+  PORT: "3001"
+  LOG_LEVEL: "debug"
+  LOG_FORMAT: "pretty"
+  
+  # Database configuration (staging)
+  DATABASE_HOST: "postgres-service"
+  DATABASE_PORT: "5432"
+  DATABASE_NAME: "ai_api_integrator_staging"
+  DATABASE_SSL: "true"
+  DATABASE_POOL_SIZE: "10"
+  
+  # Redis configuration
+  REDIS_HOST: "redis-service"
+  REDIS_PORT: "6379"
+  REDIS_DB: "1"
+  REDIS_TTL: "1800"
+  
+  # NATS configuration
+  NATS_URL: "nats://nats-service:4222"
+  
+  # JWT configuration
+  JWT_EXPIRES_IN: "1h"
+  JWT_REFRESH_EXPIRES_IN: "7d"
+  
+  # OAuth callback URLs (staging)
+  GOOGLE_CALLBACK_URL: "https://staging-api.your-domain.com/auth/google/callback"
+  GITHUB_CALLBACK_URL: "https://staging-api.your-domain.com/auth/github/callback"
+  
+  # S3 configuration (staging)
+  AWS_REGION: "us-east-1"
+  S3_BUCKET_NAME: "ai-api-integrator-staging"
+  
+  # Email configuration (staging)
+  SMTP_HOST: "smtp.your-email-provider.com"
+  SMTP_PORT: "587"
+  SMTP_SECURE: "false"
+  FROM_EMAIL: "staging@your-domain.com"
+  FROM_NAME: "AI API Integrator Staging"
+  
+  # Temporal configuration
+  TEMPORAL_NAMESPACE: "ai-api-integrator-staging"
+  TEMPORAL_TASK_QUEUE: "flow-execution-staging"
+  
+  # Feature flags (all enabled for staging testing)
+  FEATURE_RAG_INFERENCE: "true"
+  FEATURE_TEMPORAL_WORKFLOWS: "true"
+  FEATURE_OAUTH_PROVIDERS: "true"
+  FEATURE_MAGIC_LINKS: "true"
+  FEATURE_PARTNER_SHARING: "true"
+  FEATURE_ADVANCED_PAGINATION: "true"
+  FEATURE_ADVANCED_AUTH: "true"
+  FEATURE_LARGE_SPEC_OPTIMIZATION: "true"
+  
+  # Security (more relaxed for staging)
+  CORS_ORIGIN: "https://staging.your-domain.com"
+  CORS_CREDENTIALS: "true"
+  HELMET_ENABLED: "true"
+  CSRF_PROTECTION_ENABLED: "false"
+  
+  # Performance (more lenient for staging)
+  RATE_LIMIT_WINDOW_MS: "900000"
+  RATE_LIMIT_MAX_REQUESTS: "1000"
+  HTTP_TIMEOUT: "30000"
+  HTTP_RETRIES: "3"
+  
+  # Health checks
+  HEALTH_CHECK_ENABLED: "true"
+  HEALTH_CHECK_PATH: "/health"
+  HEALTH_CHECK_TIMEOUT: "5000"
+  
+  # Monitoring
+  PROMETHEUS_METRICS_ENABLED: "true"
+  PROMETHEUS_METRICS_PORT: "9090"
+  PROMETHEUS_METRICS_PATH: "/metrics"

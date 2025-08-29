@@ -1,0 +1,15 @@
+apiVersion: v2
+name: {{projectName}}
+description: A Helm chart for {{projectName}} API
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+
+keywords:
+  - {{projectName}}
+  - api
+  - integration
+
+maintainers:
+  - name: AI API Integrator
+    email: support@ai-api-integrator.com

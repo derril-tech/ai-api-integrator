@@ -1,0 +1,332 @@
+"""
+{{entityName}} API Client
+
+This module provides a Python client for interacting with the {{entityName}} API.
+"""
+
+import asyncio
+import json
+import logging
+from typing import Any, Dict, List, Optional, Union
+from urllib.parse import urlencode, urljoin
+
+import aiohttp
+import backoff
+from pydantic import BaseModel, Field
+
+from .config import {{entityName}}Config
+from .exceptions import {{entityName}}Error, {{entityName}}AuthError, {{entityName}}RateLimitError
+from .models import *
+from .pagination import PaginatedResponse
+from .retry import RetryConfig
+
+logger = logging.getLogger(__name__)
+
+
+class {{entityName}}Client:
+    """
+    Async client for {{entityName}} API.
+
+    Provides methods for interacting with all {{entityName}} API endpoints
+    with automatic retry, pagination handling, and error management.
+    """
+
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
+        config: Optional[{{entityName}}Config] = None,
+        session: Optional[aiohttp.ClientSession] = None,
+    ):
+        """
+        Initialize the {{entityName}} API client.
+
+        Args:
+            api_key: API key for authentication
+            base_url: Base URL for the API
+            config: Configuration object
+            session: Custom aiohttp session (optional)
+        """
+        self.config = config or {{entityName}}Config()
+        self.api_key = api_key or self.config.api_key
+        self.base_url = base_url or self.config.base_url
+        self.session = session
+
+        if not self.api_key:
+            raise ValueError("API key is required")
+
+        # Initialize session if not provided
+        if self.session is None:
+            timeout = aiohttp.ClientTimeout(total=self.config.timeout)
+            self.session = aiohttp.ClientSession(
+                timeout=timeout,
+                headers=self._get_default_headers()
+            )
+
+    def _get_default_headers(self) -> Dict[str, str]:
+        """Get default headers for all requests."""
+        return {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "User-Agent": f"{{entityName}}-python/{self.config.version}",
+            "Accept": "application/json",
+        }
+
+    async def __aenter__(self):
+        """Async context manager entry."""
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Async context manager exit."""
+        await self.close()
+
+    async def close(self):
+        """Close the client session."""
+        if self.session and not self.session.closed:
+            await self.session.close()
+
+    @backoff.on_exception(
+        backoff.expo,
+        (aiohttp.ClientError, {{entityName}}RateLimitError),
+        max_tries=3,
+        giveup=lambda e: isinstance(e, {{entityName}}AuthError),
+    )
+    async def _make_request(
+        self,
+        method: str,
+        endpoint: str,
+        data: Optional[Dict[str, Any]] = None,
+        params: Optional[Dict[str, Any]] = None,
+        headers: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Make an HTTP request with retry logic and error handling.
+
+        Args:
+            method: HTTP method (GET, POST, PUT, DELETE)
+            endpoint: API endpoint path
+            data: Request body data
+            params: Query parameters
+            headers: Additional headers
+
+        Returns:
+            Parsed JSON response
+
+        Raises:
+            {{entityName}}Error: For API errors
+            {{entityName}}AuthError: For authentication errors
+            {{entityName}}RateLimitError: For rate limit errors
+        """
+        url = urljoin(self.base_url, endpoint.lstrip('/'))
+
+        request_headers = self._get_default_headers()
+        if headers:
+            request_headers.update(headers)
+
+        # Prepare request data
+        json_data = None
+        if data is not None:
+            json_data = json.dumps(data)
+
+        # Prepare query parameters
+        query_string = ""
+        if params:
+            query_string = "?" + urlencode(params)
+
+        full_url = url + query_string
+
+        logger.debug(f"Making {method} request to {full_url}")
+
+        try:
+            async with self.session.request(
+                method=method,
+                url=full_url,
+                data=json_data,
+                headers=request_headers,
+            ) as response:
+                # Handle different response status codes
+                if response.status == 401:
+                    raise {{entityName}}AuthError("Invalid API key")
+                elif response.status == 429:
+                    retry_after = response.headers.get('Retry-After', '60')
+                    raise {{entityName}}RateLimitError(f"Rate limit exceeded. Retry after {retry_after}s")
+                elif response.status >= 400:
+                    error_text = await response.text()
+                    try:
+                        error_data = json.loads(error_text)
+                        error_message = error_data.get('message', f"HTTP {response.status}")
+                    except json.JSONDecodeError:
+                        error_message = error_text or f"HTTP {response.status}"
+                    raise {{entityName}}Error(error_message)
+
+                # Parse successful response
+                response_text = await response.text()
+                if not response_text:
+                    return {}
+
+                try:
+                    return json.loads(response_text)
+                except json.JSONDecodeError as e:
+                    logger.error(f"Failed to parse JSON response: {e}")
+                    raise {{entityName}}Error("Invalid JSON response from server")
+
+        except aiohttp.ClientError as e:
+            logger.error(f"HTTP client error: {e}")
+            raise {{entityName}}Error(f"Network error: {e}")
+
+    async def _get_paginated(
+        self,
+        endpoint: str,
+        params: Optional[Dict[str, Any]] = None,
+        max_pages: Optional[int] = None,
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        Get paginated results from an endpoint.
+
+        Args:
+            endpoint: API endpoint path
+            params: Initial query parameters
+            max_pages: Maximum number of pages to fetch
+
+        Yields:
+            Individual items from the paginated response
+        """
+        page = 1
+        params = params or {}
+
+        while max_pages is None or page <= max_pages:
+            # Add pagination parameters
+            request_params = {**params}
+            if 'page' not in request_params:
+                request_params['page'] = page
+            if 'limit' not in request_params:
+                request_params['limit'] = 100
+
+            response = await self._make_request('GET', endpoint, params=request_params)
+            paginated_response = PaginatedResponse(**response)
+
+            # Yield items from this page
+            for item in paginated_response.data:
+                yield item
+
+            # Check if there are more pages
+            if not paginated_response.has_more or not paginated_response.data:
+                break
+
+            page += 1
+
+    # API Methods - these will be generated based on the OpenAPI spec
+    {% for endpoint in endpoints %}
+    {% if endpoint.method == 'GET' and endpoint.path.endswith('s') %}
+    async def list_{{ endpoint.path | replace('/', '_') | replace('{', '') | replace('}', '') | replace('_', '') | lower }}(
+        self,
+        **params
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        List {{ endpoint.path | replace('/', ' ') | title }}.
+
+        Args:
+            **params: Query parameters for filtering and pagination
+
+        Yields:
+            {{ endpoint.path | replace('/', ' ') | title }} objects
+        """
+        async for item in self._get_paginated('{{ endpoint.path }}', params):
+            yield item
+
+    {% elif endpoint.method == 'GET' %}
+    async def get_{{ endpoint.path | replace('/', '_') | replace('{', '') | replace('}', '') | replace('_', '') | lower }}(
+        self,
+        {{ endpoint.path | extract_path_params | join(', ') }},
+        **params
+    ) -> Dict[str, Any]:
+        """
+        Get a single {{ endpoint.path | replace('/', ' ') | title }}.
+
+        Args:
+            {{ endpoint.path | extract_path_params | join(': Path parameter\n            ') }}: Path parameters
+            **params: Additional query parameters
+
+        Returns:
+            {{ endpoint.path | replace('/', ' ') | title }} object
+        """
+        path = '{{ endpoint.path }}'.format({{ endpoint.path | extract_path_params | join('=') }})
+        return await self._make_request('GET', path, params=params)
+
+    {% elif endpoint.method == 'POST' %}
+    async def create_{{ endpoint.path | replace('/', '_') | replace('{', '') | replace('}', '') | replace('_', '') | lower }}(
+        self,
+        data: Dict[str, Any],
+        **params
+    ) -> Dict[str, Any]:
+        """
+        Create a new {{ endpoint.path | replace('/', ' ') | title }}.
+
+        Args:
+            data: {{ endpoint.path | replace('/', ' ') | title }} data
+            **params: Additional query parameters
+
+        Returns:
+            Created {{ endpoint.path | replace('/', ' ') | title }} object
+        """
+        return await self._make_request('POST', '{{ endpoint.path }}', data=data, params=params)
+
+    {% elif endpoint.method == 'PUT' %}
+    async def update_{{ endpoint.path | replace('/', '_') | replace('{', '') | replace('}', '') | replace('_', '') | lower }}(
+        self,
+        {{ endpoint.path | extract_path_params | join(', ') }},
+        data: Dict[str, Any],
+        **params
+    ) -> Dict[str, Any]:
+        """
+        Update a {{ endpoint.path | replace('/', ' ') | title }}.
+
+        Args:
+            {{ endpoint.path | extract_path_params | join(': Path parameter\n            ') }}: Path parameters
+            data: Updated {{ endpoint.path | replace('/', ' ') | title }} data
+            **params: Additional query parameters
+
+        Returns:
+            Updated {{ endpoint.path | replace('/', ' ') | title }} object
+        """
+        path = '{{ endpoint.path }}'.format({{ endpoint.path | extract_path_params | join('=') }})
+        return await self._make_request('PUT', path, data=data, params=params)
+
+    {% elif endpoint.method == 'DELETE' %}
+    async def delete_{{ endpoint.path | replace('/', '_') | replace('{', '') | replace('}', '') | replace('_', '') | lower }}(
+        self,
+        {{ endpoint.path | extract_path_params | join(', ') }},
+        **params
+    ) -> Dict[str, Any]:
+        """
+        Delete a {{ endpoint.path | replace('/', ' ') | title }}.
+
+        Args:
+            {{ endpoint.path | extract_path_params | join(': Path parameter\n            ') }}: Path parameters
+            **params: Additional query parameters
+
+        Returns:
+            Deletion confirmation
+        """
+        path = '{{ endpoint.path }}'.format({{ endpoint.path | extract_path_params | join('=') }})
+        return await self._make_request('DELETE', path, params=params)
+
+    {% endif %}
+    {% endfor %}
+
+    # Utility methods
+    async def health_check(self) -> Dict[str, Any]:
+        """
+        Perform a health check against the API.
+
+        Returns:
+            Health check response
+        """
+        try:
+            return await self._make_request('GET', '/health')
+        except Exception as e:
+            return {
+                'status': 'unhealthy',
+                'error': str(e),
+                'timestamp': asyncio.get_event_loop().time(),
+            }

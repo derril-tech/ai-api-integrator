@@ -1,0 +1,264 @@
+# Prometheus Alert Rules for AI API Integrator
+
+groups:
+  - name: ai-api-integrator.rules
+    rules:
+      # High-level service availability
+      - alert: ServiceDown
+        expr: up{job="ai-api-integrator-api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: ai-api-integrator
+        annotations:
+          summary: "AI API Integrator service is down"
+          description: "Service {{ $labels.instance }} has been down for more than 1 minute."
+
+      - alert: HighErrorRate
+        expr: (rate(http_requests_total{job="ai-api-integrator-api",status=~"5.."}[5m]) / rate(http_requests_total{job="ai-api-integrator-api"}[5m])) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+          service: ai-api-integrator
+        annotations:
+          summary: "High error rate detected"
+          description: "Error rate is {{ $value | humanizePercentage }} for instance {{ $labels.instance }}"
+
+      - alert: CriticalErrorRate
+        expr: (rate(http_requests_total{job="ai-api-integrator-api",status=~"5.."}[5m]) / rate(http_requests_total{job="ai-api-integrator-api"}[5m])) > 0.25
+        for: 2m
+        labels:
+          severity: critical
+          service: ai-api-integrator
+        annotations:
+          summary: "Critical error rate detected"
+          description: "Error rate is {{ $value | humanizePercentage }} for instance {{ $labels.instance }}"
+
+      # Response time alerts
+      - alert: HighResponseTime
+        expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket{job="ai-api-integrator-api"}[5m])) > 2
+        for: 5m
+        labels:
+          severity: warning
+          service: ai-api-integrator
+        annotations:
+          summary: "High response time detected"
+          description: "95th percentile response time is {{ $value }}s for instance {{ $labels.instance }}"
+
+      - alert: VeryHighResponseTime
+        expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket{job="ai-api-integrator-api"}[5m])) > 5
+        for: 2m
+        labels:
+          severity: critical
+          service: ai-api-integrator
+        annotations:
+          summary: "Very high response time detected"
+          description: "95th percentile response time is {{ $value }}s for instance {{ $labels.instance }}"
+
+      # Memory alerts
+      - alert: HighMemoryUsage
+        expr: (process_resident_memory_bytes{job="ai-api-integrator-api"} / 1024 / 1024 / 1024) > 0.8
+        for: 5m
+        labels:
+          severity: warning
+          service: ai-api-integrator
+        annotations:
+          summary: "High memory usage detected"
+          description: "Memory usage is {{ $value | humanize }}GB for instance {{ $labels.instance }}"
+
+      - alert: CriticalMemoryUsage
+        expr: (process_resident_memory_bytes{job="ai-api-integrator-api"} / 1024 / 1024 / 1024) > 1.5
+        for: 2m
+        labels:
+          severity: critical
+          service: ai-api-integrator
+        annotations:
+          summary: "Critical memory usage detected"
+          description: "Memory usage is {{ $value | humanize }}GB for instance {{ $labels.instance }}"
+
+      # CPU alerts
+      - alert: HighCPUUsage
+        expr: rate(process_cpu_seconds_total{job="ai-api-integrator-api"}[5m]) > 0.8
+        for: 10m
+        labels:
+          severity: warning
+          service: ai-api-integrator
+        annotations:
+          summary: "High CPU usage detected"
+          description: "CPU usage is {{ $value | humanizePercentage }} for instance {{ $labels.instance }}"
+
+      # Database alerts
+      - alert: DatabaseConnectionFailure
+        expr: up{job="postgres"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: database
+        annotations:
+          summary: "Database connection failure"
+          description: "Cannot connect to PostgreSQL database"
+
+      - alert: DatabaseHighConnections
+        expr: pg_stat_database_numbackends{job="postgres"} > 80
+        for: 5m
+        labels:
+          severity: warning
+          service: database
+        annotations:
+          summary: "High database connections"
+          description: "Database has {{ $value }} active connections"
+
+      - alert: DatabaseSlowQueries
+        expr: rate(pg_stat_database_tup_returned{job="postgres"}[5m]) / rate(pg_stat_database_tup_fetched{job="postgres"}[5m]) < 0.1
+        for: 5m
+        labels:
+          severity: warning
+          service: database
+        annotations:
+          summary: "Database slow queries detected"
+          description: "Database query efficiency is low: {{ $value | humanizePercentage }}"
+
+      # Redis alerts
+      - alert: RedisConnectionFailure
+        expr: up{job="redis"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: redis
+        annotations:
+          summary: "Redis connection failure"
+          description: "Cannot connect to Redis server"
+
+      - alert: RedisHighMemoryUsage
+        expr: (redis_memory_used_bytes{job="redis"} / redis_memory_max_bytes{job="redis"}) > 0.9
+        for: 5m
+        labels:
+          severity: warning
+          service: redis
+        annotations:
+          summary: "Redis high memory usage"
+          description: "Redis memory usage is {{ $value | humanizePercentage }}"
+
+      # Kubernetes alerts
+      - alert: PodCrashLooping
+        expr: rate(kube_pod_container_status_restarts_total[15m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+          service: kubernetes
+        annotations:
+          summary: "Pod is crash looping"
+          description: "Pod {{ $labels.namespace }}/{{ $labels.pod }} is restarting frequently"
+
+      - alert: PodNotReady
+        expr: kube_pod_status_ready{condition="false"} == 1
+        for: 5m
+        labels:
+          severity: warning
+          service: kubernetes
+        annotations:
+          summary: "Pod not ready"
+          description: "Pod {{ $labels.namespace }}/{{ $labels.pod }} has been not ready for more than 5 minutes"
+
+      - alert: NodeNotReady
+        expr: kube_node_status_ready{condition="false"} == 1
+        for: 5m
+        labels:
+          severity: critical
+          service: kubernetes
+        annotations:
+          summary: "Node not ready"
+          description: "Node {{ $labels.node }} has been not ready for more than 5 minutes"
+
+      # Disk space alerts
+      - alert: DiskSpaceWarning
+        expr: (node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"}) < 0.2
+        for: 5m
+        labels:
+          severity: warning
+          service: system
+        annotations:
+          summary: "Low disk space"
+          description: "Disk space is below 20% on {{ $labels.instance }}"
+
+      - alert: DiskSpaceCritical
+        expr: (node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"}) < 0.1
+        for: 2m
+        labels:
+          severity: critical
+          service: system
+        annotations:
+          summary: "Critical disk space"
+          description: "Disk space is below 10% on {{ $labels.instance }}"
+
+      # API-specific alerts
+      - alert: AuthenticationFailureSpike
+        expr: rate(http_requests_total{job="ai-api-integrator-api",endpoint="/auth/login",status="401"}[5m]) > 10
+        for: 2m
+        labels:
+          severity: warning
+          service: ai-api-integrator
+        annotations:
+          summary: "Authentication failure spike"
+          description: "High number of authentication failures: {{ $value }} per second"
+
+      - alert: APISpecProcessingFailure
+        expr: rate(api_spec_processing_failures_total[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+          service: ai-api-integrator
+        annotations:
+          summary: "API spec processing failures"
+          description: "API specification processing is failing at {{ $value }} per second"
+
+      - alert: WorkflowExecutionFailure
+        expr: rate(workflow_execution_failures_total[5m]) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+          service: ai-api-integrator
+        annotations:
+          summary: "Workflow execution failures"
+          description: "Workflow executions are failing at {{ $value }} per second"
+
+      - alert: TemporalConnectionLoss
+        expr: temporal_connection_status == 0
+        for: 1m
+        labels:
+          severity: warning
+          service: temporal
+        annotations:
+          summary: "Temporal connection lost"
+          description: "Connection to Temporal server has been lost"
+
+      # Business logic alerts
+      - alert: LowAPIUsage
+        expr: rate(http_requests_total{job="ai-api-integrator-api"}[1h]) < 0.1
+        for: 30m
+        labels:
+          severity: info
+          service: ai-api-integrator
+        annotations:
+          summary: "Low API usage"
+          description: "API usage is unusually low: {{ $value }} requests per second over the last hour"
+
+      - alert: HighAPIUsage
+        expr: rate(http_requests_total{job="ai-api-integrator-api"}[5m]) > 100
+        for: 5m
+        labels:
+          severity: warning
+          service: ai-api-integrator
+        annotations:
+          summary: "High API usage"
+          description: "API usage is unusually high: {{ $value }} requests per second"
+
+      - alert: CodeGenerationBacklog
+        expr: codegen_queue_size > 50
+        for: 10m
+        labels:
+          severity: warning
+          service: ai-api-integrator
+        annotations:
+          summary: "Code generation backlog"
+          description: "Code generation queue has {{ $value }} pending jobs"

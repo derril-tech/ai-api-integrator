@@ -1,0 +1,517 @@
+"""
+AsyncAPI Streaming Client for {{entityName}}
+
+This module provides an asynchronous streaming client for AsyncAPI-compliant
+real-time APIs with automatic reconnection and message handling.
+"""
+
+import asyncio
+import json
+import logging
+from typing import Any, Dict, List, Optional, Callable, Union
+from dataclasses import dataclass
+from abc import ABC, abstractmethod
+import websockets
+from websockets.exceptions import ConnectionClosedError, WebSocketException
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class StreamingConfig:
+    """Configuration for streaming client."""
+    url: str
+    api_key: Optional[str] = None
+    reconnect_interval: float = 5.0
+    max_reconnects: int = 10
+    heartbeat_interval: float = 30.0
+    connection_timeout: float = 10.0
+    ping_interval: float = 20.0
+    ping_timeout: float = 5.0
+
+
+@dataclass
+class StreamingMessage:
+    """Represents a streaming message."""
+    id: Optional[str] = None
+    channel: str = ""
+    type: str = ""
+    data: Any = None
+    timestamp: Optional[int] = None
+    headers: Optional[Dict[str, str]] = None
+
+
+class MessageHandler:
+    """
+    Base class for message handlers.
+    """
+
+    async def on_message(self, message: StreamingMessage) -> None:
+        """Handle incoming message."""
+        pass
+
+    async def on_connected(self) -> None:
+        """Handle connection established."""
+        pass
+
+    async def on_disconnected(self) -> None:
+        """Handle connection lost."""
+        pass
+
+    async def on_error(self, error: Exception) -> None:
+        """Handle connection error."""
+        pass
+
+
+class AsyncAPIStreamingClient:
+    """
+    Asynchronous streaming client for AsyncAPI-compliant APIs.
+    """
+
+    def __init__(self, config: StreamingConfig):
+        """
+        Initialize streaming client.
+
+        Args:
+            config: Client configuration
+        """
+        self.config = config
+        self.websocket: Optional[websockets.WebSocketServerProtocol] = None
+        self.connected = False
+        self.reconnect_attempts = 0
+        self.subscriptions: set[str] = set()
+        self.message_handlers: Dict[str, List[MessageHandler]] = {}
+        self.general_handlers: List[MessageHandler] = []
+        self.reconnect_task: Optional[asyncio.Task] = None
+        self.heartbeat_task: Optional[asyncio.Task] = None
+        self.ping_task: Optional[asyncio.Task] = None
+
+    async def connect(self) -> None:
+        """
+        Establish connection to the streaming service.
+        """
+        try:
+            headers = {}
+            if self.config.api_key:
+                headers['Authorization'] = f'Bearer {self.config.api_key}'
+
+            self.websocket = await asyncio.wait_for(
+                websockets.connect(
+                    self.config.url,
+                    extra_headers=headers,
+                    ping_interval=self.config.ping_interval,
+                    ping_timeout=self.config.ping_timeout,
+                ),
+                timeout=self.config.connection_timeout
+            )
+
+            self.connected = True
+            self.reconnect_attempts = 0
+
+            logger.info(f"Connected to streaming service at {self.config.url}")
+
+            # Notify handlers
+            for handler in self.general_handlers:
+                try:
+                    await handler.on_connected()
+                except Exception as e:
+                    logger.error(f"Handler error on connect: {e}")
+
+            # Start background tasks
+            asyncio.create_task(self._message_loop())
+            asyncio.create_task(self._start_heartbeat())
+
+        except Exception as e:
+            logger.error(f"Failed to connect: {e}")
+            if self.reconnect_attempts < self.config.max_reconnects:
+                await self._schedule_reconnect()
+            else:
+                raise
+
+    async def disconnect(self) -> None:
+        """
+        Close connection to the streaming service.
+        """
+        self.connected = False
+
+        # Cancel background tasks
+        if self.reconnect_task and not self.reconnect_task.done():
+            self.reconnect_task.cancel()
+
+        if self.heartbeat_task and not self.heartbeat_task.done():
+            self.heartbeat_task.cancel()
+
+        if self.ping_task and not self.ping_task.done():
+            self.ping_task.cancel()
+
+        # Close websocket
+        if self.websocket:
+            await self.websocket.close()
+            self.websocket = None
+
+        # Clear subscriptions
+        self.subscriptions.clear()
+
+        # Notify handlers
+        for handler in self.general_handlers:
+            try:
+                await handler.on_disconnected()
+            except Exception as e:
+                logger.error(f"Handler error on disconnect: {e}")
+
+    async def subscribe(self, channel: str) -> None:
+        """
+        Subscribe to a channel.
+
+        Args:
+            channel: Channel name to subscribe to
+        """
+        if not self.connected or not self.websocket:
+            raise ConnectionError("Not connected to streaming service")
+
+        self.subscriptions.add(channel)
+
+        subscription_message = {
+            'type': 'subscribe',
+            'channel': channel,
+            'id': f'sub_{asyncio.get_event_loop().time() * 1000:.0f}',
+        }
+
+        await self._send_message(subscription_message)
+
+    async def unsubscribe(self, channel: str) -> None:
+        """
+        Unsubscribe from a channel.
+
+        Args:
+            channel: Channel name to unsubscribe from
+        """
+        if not self.connected or not self.websocket:
+            raise ConnectionError("Not connected to streaming service")
+
+        self.subscriptions.discard(channel)
+
+        unsubscribe_message = {
+            'type': 'unsubscribe',
+            'channel': channel,
+            'id': f'unsub_{asyncio.get_event_loop().time() * 1000:.0f}',
+        }
+
+        await self._send_message(unsubscribe_message)
+
+    async def publish(self, channel: str, data: Any) -> None:
+        """
+        Publish a message to a channel.
+
+        Args:
+            channel: Target channel
+            data: Message data
+        """
+        if not self.connected or not self.websocket:
+            raise ConnectionError("Not connected to streaming service")
+
+        message = {
+            'type': 'publish',
+            'channel': channel,
+            'data': data,
+            'id': f'pub_{asyncio.get_event_loop().time() * 1000:.0f}',
+            'timestamp': int(asyncio.get_event_loop().time() * 1000),
+        }
+
+        await self._send_message(message)
+
+    async def send_raw(self, data: Any) -> None:
+        """
+        Send a raw message.
+
+        Args:
+            data: Raw message data
+        """
+        if not self.connected or not self.websocket:
+            raise ConnectionError("Not connected to streaming service")
+
+        await self._send_message(data)
+
+    def add_message_handler(self, message_type: str, handler: MessageHandler) -> None:
+        """
+        Add a message handler for a specific message type.
+
+        Args:
+            message_type: Message type to handle ('*' for all messages)
+            handler: Handler instance
+        """
+        if message_type == '*':
+            if handler not in self.general_handlers:
+                self.general_handlers.append(handler)
+        else:
+            if message_type not in self.message_handlers:
+                self.message_handlers[message_type] = []
+            if handler not in self.message_handlers[message_type]:
+                self.message_handlers[message_type].append(handler)
+
+    def remove_message_handler(self, message_type: str, handler: MessageHandler) -> None:
+        """
+        Remove a message handler.
+
+        Args:
+            message_type: Message type
+            handler: Handler instance
+        """
+        if message_type == '*':
+            if handler in self.general_handlers:
+                self.general_handlers.remove(handler)
+        elif message_type in self.message_handlers:
+            if handler in self.message_handlers[message_type]:
+                self.message_handlers[message_type].remove(handler)
+
+    def is_connected(self) -> bool:
+        """
+        Check if client is connected.
+
+        Returns:
+            True if connected
+        """
+        return self.connected
+
+    def get_subscriptions(self) -> List[str]:
+        """
+        Get active subscriptions.
+
+        Returns:
+            List of subscribed channels
+        """
+        return list(self.subscriptions)
+
+    async def _send_message(self, data: Any) -> None:
+        """
+        Send a message through the websocket.
+
+        Args:
+            data: Message data
+        """
+        if not self.websocket:
+            raise ConnectionError("WebSocket not available")
+
+        try:
+            json_data = json.dumps(data)
+            await self.websocket.send(json_data)
+        except Exception as e:
+            logger.error(f"Failed to send message: {e}")
+            raise
+
+    async def _message_loop(self) -> None:
+        """
+        Main message processing loop.
+        """
+        try:
+            while self.connected and self.websocket:
+                try:
+                    raw_message = await self.websocket.recv()
+                    message = self._parse_message(raw_message)
+                    await self._handle_message(message)
+
+                except websockets.exceptions.ConnectionClosed:
+                    logger.info("Connection closed by server")
+                    break
+                except Exception as e:
+                    logger.error(f"Message loop error: {e}")
+
+                    # Notify error handlers
+                    for handler in self.general_handlers:
+                        try:
+                            await handler.on_error(e)
+                        except Exception as handler_error:
+                            logger.error(f"Handler error: {handler_error}")
+
+                    break
+
+        finally:
+            self.connected = False
+            if self.reconnect_attempts < self.config.max_reconnects:
+                await self._schedule_reconnect()
+
+    def _parse_message(self, raw_message: Union[str, bytes]) -> StreamingMessage:
+        """
+        Parse incoming message.
+
+        Args:
+            raw_message: Raw message data
+
+        Returns:
+            Parsed streaming message
+        """
+        try:
+            data = json.loads(raw_message)
+
+            return StreamingMessage(
+                id=data.get('id'),
+                channel=data.get('channel', ''),
+                type=data.get('type', ''),
+                data=data.get('data'),
+                timestamp=data.get('timestamp'),
+            )
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse message: {e}")
+            return StreamingMessage(type='error', data={'error': str(e)})
+
+    async def _handle_message(self, message: StreamingMessage) -> None:
+        """
+        Handle incoming message.
+
+        Args:
+            message: Parsed message
+        """
+        # Notify general handlers
+        for handler in self.general_handlers:
+            try:
+                await handler.on_message(message)
+            except Exception as e:
+                logger.error(f"General handler error: {e}")
+
+        # Notify type-specific handlers
+        if message.type in self.message_handlers:
+            for handler in self.message_handlers[message.type]:
+                try:
+                    await handler.on_message(message)
+                except Exception as e:
+                    logger.error(f"Type handler error for {message.type}: {e}")
+
+        # Handle system messages
+        if message.type == 'heartbeat':
+            await self._handle_heartbeat(message)
+        elif message.type == 'error':
+            logger.error(f"Server error: {message.data}")
+
+    async def _handle_heartbeat(self, message: StreamingMessage) -> None:
+        """
+        Handle heartbeat message.
+
+        Args:
+            message: Heartbeat message
+        """
+        # Send heartbeat response
+        response = {
+            'type': 'heartbeat_response',
+            'timestamp': int(asyncio.get_event_loop().time() * 1000),
+        }
+        await self._send_message(response)
+
+    async def _start_heartbeat(self) -> None:
+        """
+        Start heartbeat timer.
+        """
+        try:
+            while self.connected:
+                await asyncio.sleep(self.config.heartbeat_interval)
+
+                if self.connected:
+                    heartbeat = {
+                        'type': 'heartbeat',
+                        'timestamp': int(asyncio.get_event_loop().time() * 1000),
+                    }
+                    try:
+                        await self._send_message(heartbeat)
+                    except Exception as e:
+                        logger.error(f"Heartbeat failed: {e}")
+                        break
+        except asyncio.CancelledError:
+            pass
+
+    async def _schedule_reconnect(self) -> None:
+        """
+        Schedule a reconnection attempt.
+        """
+        if self.reconnect_task and not self.reconnect_task.done():
+            self.reconnect_task.cancel()
+
+        self.reconnect_attempts += 1
+        delay = self.config.reconnect_interval * (1.5 ** (self.reconnect_attempts - 1))
+
+        logger.info(f"Scheduling reconnect in {delay:.2f}s (attempt {self.reconnect_attempts})")
+
+        self.reconnect_task = asyncio.create_task(self._reconnect_with_delay(delay))
+
+    async def _reconnect_with_delay(self, delay: float) -> None:
+        """
+        Attempt to reconnect after a delay.
+
+        Args:
+            delay: Delay in seconds
+        """
+        await asyncio.sleep(delay)
+        try:
+            await self.connect()
+        except Exception as e:
+            logger.error(f"Reconnection failed: {e}")
+            if self.reconnect_attempts < self.config.max_reconnects:
+                await self._schedule_reconnect()
+
+
+# Protocol-specific client factories
+def create_websocket_client(url: str, api_key: Optional[str] = None) -> AsyncAPIStreamingClient:
+    """
+    Create a WebSocket streaming client.
+
+    Args:
+        url: WebSocket URL
+        api_key: Optional API key
+
+    Returns:
+        Configured streaming client
+    """
+    config = StreamingConfig(
+        url=url,
+        api_key=api_key,
+        reconnect_interval=5.0,
+        max_reconnects=10,
+        heartbeat_interval=30.0,
+    )
+    return AsyncAPIStreamingClient(config)
+
+
+def create_mqtt_client(broker_url: str, client_id: str, api_key: Optional[str] = None) -> AsyncAPIStreamingClient:
+    """
+    Create an MQTT streaming client.
+
+    Note: MQTT implementation would require additional dependencies.
+    Currently returns WebSocket client as fallback.
+
+    Args:
+        broker_url: MQTT broker URL
+        client_id: Client identifier
+        api_key: Optional API key
+
+    Returns:
+        Configured streaming client
+    """
+    # For now, return WebSocket client
+    # MQTT implementation would require 'paho-mqtt' or similar
+    config = StreamingConfig(
+        url=broker_url,
+        api_key=api_key,
+    )
+    return AsyncAPIStreamingClient(config)
+
+
+def create_kafka_client(broker_url: str, group_id: str, api_key: Optional[str] = None) -> AsyncAPIStreamingClient:
+    """
+    Create a Kafka streaming client.
+
+    Note: Kafka implementation would require additional dependencies.
+    Currently returns WebSocket client as fallback.
+
+    Args:
+        broker_url: Kafka broker URL
+        group_id: Consumer group ID
+        api_key: Optional API key
+
+    Returns:
+        Configured streaming client
+    """
+    # For now, return WebSocket client
+    # Kafka implementation would require 'kafka-python' or similar
+    config = StreamingConfig(
+        url=broker_url,
+        api_key=api_key,
+    )
+    return AsyncAPIStreamingClient(config)

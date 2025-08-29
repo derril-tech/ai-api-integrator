@@ -1,0 +1,68 @@
+"""
+{{entityName}} Python SDK
+
+A comprehensive Python SDK for interacting with the {{entityName}} API.
+"""
+
+from .client import {{entityName}}Client
+from .config import {{entityName}}Config
+from .exceptions import (
+    {{entityName}}Error,
+    {{entityName}}AuthError,
+    {{entityName}}RateLimitError,
+    {{entityName}}NotFoundError,
+    {{entityName}}ValidationError,
+    {{entityName}}ServerError,
+    {{entityName}}ConfigurationError,
+    {{entityName}}NetworkError,
+)
+from .models import *
+from .pagination import (
+    PaginatedResponse,
+    PaginationIterator,
+    CursorPaginationIterator,
+    RateLimitedPaginator,
+)
+from .retry import (
+    RetryConfig,
+    RetryStats,
+    CircuitBreaker,
+    RetryableHTTPClient,
+    create_exponential_backoff_config,
+    create_linear_backoff_config,
+    create_aggressive_retry_config,
+    create_conservative_retry_config,
+)
+
+__version__ = "1.0.0"
+__all__ = [
+    # Main client
+    "{{entityName}}Client",
+    "{{entityName}}Config",
+
+    # Exceptions
+    "{{entityName}}Error",
+    "{{entityName}}AuthError",
+    "{{entityName}}RateLimitError",
+    "{{entityName}}NotFoundError",
+    "{{entityName}}ValidationError",
+    "{{entityName}}ServerError",
+    "{{entityName}}ConfigurationError",
+    "{{entityName}}NetworkError",
+
+    # Pagination
+    "PaginatedResponse",
+    "PaginationIterator",
+    "CursorPaginationIterator",
+    "RateLimitedPaginator",
+
+    # Retry utilities
+    "RetryConfig",
+    "RetryStats",
+    "CircuitBreaker",
+    "RetryableHTTPClient",
+    "create_exponential_backoff_config",
+    "create_linear_backoff_config",
+    "create_aggressive_retry_config",
+    "create_conservative_retry_config",
+]

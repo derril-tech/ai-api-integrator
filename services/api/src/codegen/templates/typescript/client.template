@@ -1,0 +1,278 @@
+import axios, { AxiosInstance, AxiosRequestConfig, AxiosResponse } from 'axios';
+
+export interface {{entityName}}ClientConfig {
+  baseURL: string;
+  apiKey?: string;
+  timeout?: number;
+  retries?: number;
+  retryDelay?: number;
+}
+
+export interface RequestOptions {
+  timeout?: number;
+  retries?: number;
+  retryDelay?: number;
+}
+
+export interface PaginationOptions {
+  page?: number;
+  limit?: number;
+  cursor?: string;
+}
+
+export interface PaginationResponse<T> {
+  data: T[];
+  pagination: {
+    page: number;
+    limit: number;
+    total: number;
+    hasNext: boolean;
+    hasPrev: boolean;
+    cursor?: string;
+  };
+}
+
+export class {{entityName}}Client {
+  private client: AxiosInstance;
+  private config: {{entityName}}ClientConfig;
+
+  constructor(config: {{entityName}}ClientConfig) {
+    this.config = {
+      timeout: 30000,
+      retries: 3,
+      retryDelay: 1000,
+      ...config,
+    };
+
+    this.client = axios.create({
+      baseURL: this.config.baseURL,
+      timeout: this.config.timeout,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(this.config.apiKey && { 'Authorization': `Bearer ${this.config.apiKey}` }),
+      },
+    });
+
+    this.setupInterceptors();
+  }
+
+  private setupInterceptors() {
+    // Request interceptor for logging
+    this.client.interceptors.request.use(
+      (config) => {
+        console.log(`🚀 ${config.method?.toUpperCase()} ${config.url}`);
+        return config;
+      },
+      (error) => Promise.reject(error)
+    );
+
+    // Response interceptor for error handling
+    this.client.interceptors.response.use(
+      (response) => response,
+      async (error) => {
+        const config = error.config;
+
+        if (!config || !config.retry) {
+          return Promise.reject(error);
+        }
+
+        // Implement retry logic
+        const retries = config.retries || this.config.retries || 0;
+        const retryDelay = config.retryDelay || this.config.retryDelay || 1000;
+
+        if (retries > 0 && this.shouldRetry(error)) {
+          config.retries = retries - 1;
+          await this.delay(retryDelay);
+          return this.client.request(config);
+        }
+
+        return Promise.reject(error);
+      }
+    );
+  }
+
+  private shouldRetry(error: any): boolean {
+    // Retry on network errors, 5xx errors, and specific 4xx errors
+    if (!error.response) return true; // Network error
+    const status = error.response.status;
+    return status >= 500 || status === 429 || status === 408;
+  }
+
+  private delay(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  private async request<T>(
+    method: string,
+    url: string,
+    data?: any,
+    options?: RequestOptions
+  ): Promise<AxiosResponse<T>> {
+    const config: AxiosRequestConfig = {
+      method: method as any,
+      url,
+      data,
+      timeout: options?.timeout || this.config.timeout,
+      retries: options?.retries || this.config.retries,
+      retryDelay: options?.retryDelay || this.config.retryDelay,
+    };
+
+    try {
+      const response = await this.client.request<T>(config);
+      return response;
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  private handleError(error: any): Error {
+    if (error.response) {
+      const { status, data } = error.response;
+
+      switch (status) {
+        case 400:
+          return new ValidationError('Invalid request data', data);
+        case 401:
+          return new AuthenticationError('Authentication required');
+        case 403:
+          return new AuthorizationError('Access forbidden');
+        case 404:
+          return new NotFoundError('Resource not found');
+        case 429:
+          return new RateLimitError('Rate limit exceeded');
+        case 500:
+          return new ServerError('Internal server error');
+        default:
+          return new ApiError(`HTTP ${status}: ${data?.message || 'Unknown error'}`, status, data);
+      }
+    } else if (error.request) {
+      return new NetworkError('Network request failed');
+    } else {
+      return new ClientError('Request configuration error');
+    }
+  }
+
+  // CRUD methods
+  async findAll(options?: PaginationOptions & RequestOptions): Promise<PaginationResponse<{{entityName}}>> {
+    const params = {
+      page: options?.page || 1,
+      limit: options?.limit || 10,
+      ...(options?.cursor && { cursor: options.cursor }),
+    };
+
+    const response = await this.request<PaginationResponse<{{entityName}}>>(
+      'GET',
+      '/{{entityName}}',
+      undefined,
+      options
+    );
+
+    return response.data;
+  }
+
+  async findOne(id: string, options?: RequestOptions): Promise<{{entityName}}> {
+    const response = await this.request<{{entityName}}>(
+      'GET',
+      `/{{entityName}}/${id}`,
+      undefined,
+      options
+    );
+
+    return response.data;
+  }
+
+  async create(data: Partial<{{entityName}}>, options?: RequestOptions): Promise<{{entityName}}> {
+    const response = await this.request<{{entityName}}>(
+      'POST',
+      '/{{entityName}}',
+      data,
+      options
+    );
+
+    return response.data;
+  }
+
+  async update(id: string, data: Partial<{{entityName}}>, options?: RequestOptions): Promise<{{entityName}}> {
+    const response = await this.request<{{entityName}}>(
+      'PUT',
+      `/{{entityName}}/${id}`,
+      data,
+      options
+    );
+
+    return response.data;
+  }
+
+  async delete(id: string, options?: RequestOptions): Promise<void> {
+    await this.request<void>(
+      'DELETE',
+      `/{{entityName}}/${id}`,
+      undefined,
+      options
+    );
+  }
+}
+
+// Error classes
+export class ApiError extends Error {
+  constructor(message: string, public statusCode: number, public data?: any) {
+    super(message);
+    this.name = 'ApiError';
+  }
+}
+
+export class ValidationError extends ApiError {
+  constructor(message: string, public validationErrors?: any) {
+    super(message, 400, validationErrors);
+    this.name = 'ValidationError';
+  }
+}
+
+export class AuthenticationError extends ApiError {
+  constructor(message: string = 'Authentication required') {
+    super(message, 401);
+    this.name = 'AuthenticationError';
+  }
+}
+
+export class AuthorizationError extends ApiError {
+  constructor(message: string = 'Access forbidden') {
+    super(message, 403);
+    this.name = 'AuthorizationError';
+  }
+}
+
+export class NotFoundError extends ApiError {
+  constructor(message: string = 'Resource not found') {
+    super(message, 404);
+    this.name = 'NotFoundError';
+  }
+}
+
+export class RateLimitError extends ApiError {
+  constructor(message: string = 'Rate limit exceeded') {
+    super(message, 429);
+    this.name = 'RateLimitError';
+  }
+}
+
+export class ServerError extends ApiError {
+  constructor(message: string = 'Internal server error') {
+    super(message, 500);
+    this.name = 'ServerError';
+  }
+}
+
+export class NetworkError extends Error {
+  constructor(message: string = 'Network request failed') {
+    super(message);
+    this.name = 'NetworkError';
+  }
+}
+
+export class ClientError extends Error {
+  constructor(message: string = 'Request configuration error') {
+    super(message);
+    this.name = 'ClientError';
+  }
+}

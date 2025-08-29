@@ -1,0 +1,558 @@
+"""
+Webhook Handler with Signature Validation
+
+This module provides secure webhook handling with signature validation,
+replay attack protection, and event processing.
+"""
+
+import hashlib
+import hmac
+import json
+import logging
+import time
+from typing import Any, Dict, Optional, Callable, Union
+from dataclasses import dataclass
+from abc import ABC, abstractmethod
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class WebhookConfig:
+    """Configuration for webhook validation."""
+    secret: str
+    tolerance: int = 300  # Time tolerance in seconds (5 minutes)
+    max_body_size: int = 1024 * 1024  # 1MB default
+    algorithm: str = 'sha256'
+
+
+@dataclass
+class WebhookEvent:
+    """Webhook event data structure."""
+    id: str
+    type: str
+    data: Any
+    timestamp: Optional[int] = None
+    signature: Optional[str] = None
+    headers: Optional[Dict[str, str]] = None
+
+
+@dataclass
+class WebhookValidationResult:
+    """Result of webhook validation."""
+    is_valid: bool
+    error: Optional[str] = None
+    signature: Optional[str] = None
+    expected_signature: Optional[str] = None
+    algorithm: Optional[str] = None
+    timestamp: Optional[int] = None
+    is_replay: bool = False
+
+
+class WebhookValidator:
+    """
+    Validates webhook signatures and prevents replay attacks.
+    """
+
+    def __init__(self, config: WebhookConfig):
+        """
+        Initialize webhook validator.
+
+        Args:
+            config: Webhook configuration
+        """
+        self.config = config
+        self.processed_events: set[str] = set()
+        self.max_processed_events = 10000
+
+    def validate_signature(self, payload: Union[str, bytes], signature: str) -> WebhookValidationResult:
+        """
+        Validate webhook signature using HMAC.
+
+        Args:
+            payload: Raw payload to verify
+            signature: Signature from webhook header
+
+        Returns:
+            Validation result
+        """
+        try:
+            # Remove common prefixes
+            clean_signature = signature
+            if signature.startswith('sha256='):
+                clean_signature = signature[7:]
+
+            # Decode signature
+            signature_bytes = bytes.fromhex(clean_signature)
+
+            # Create expected signature
+            payload_bytes = payload.encode() if isinstance(payload, str) else payload
+            expected_signature = hmac.new(
+                self.config.secret.encode(),
+                payload_bytes,
+                hashlib.sha256
+            ).digest()
+
+            # Use constant-time comparison
+            is_valid = hmac.compare_digest(signature_bytes, expected_signature)
+
+            return WebhookValidationResult(
+                is_valid=is_valid,
+                signature=clean_signature,
+                expected_signature=expected_signature.hex(),
+                algorithm=self.config.algorithm,
+            )
+        except Exception as e:
+            return WebhookValidationResult(
+                is_valid=False,
+                error=f"Signature validation failed: {str(e)}",
+            )
+
+    def validate_timestamped_webhook(
+        self,
+        payload: Union[str, bytes],
+        signature: str,
+        timestamp: int
+    ) -> WebhookValidationResult:
+        """
+        Validate webhook with timestamp for replay attack protection.
+
+        Args:
+            payload: Raw payload
+            signature: Webhook signature
+            timestamp: Timestamp from webhook
+
+        Returns:
+            Validation result
+        """
+        current_time = int(time.time())
+
+        # Check timestamp tolerance
+        if abs(current_time - timestamp) > self.config.tolerance:
+            return WebhookValidationResult(
+                is_valid=False,
+                error=f"Timestamp outside tolerance window (±{self.config.tolerance}s)",
+                timestamp=timestamp,
+                is_replay=True,
+            )
+
+        # Create timestamped payload
+        timestamped_payload = f"{timestamp}.{payload.decode() if isinstance(payload, bytes) else payload}"
+        result = self.validate_signature(timestamped_payload, signature)
+
+        return WebhookValidationResult(
+            is_valid=result.is_valid,
+            error=result.error,
+            signature=result.signature,
+            expected_signature=result.expected_signature,
+            algorithm=result.algorithm,
+            timestamp=timestamp,
+        )
+
+    def is_replay_attack(self, event_id: str) -> bool:
+        """
+        Check if this is a replay attack.
+
+        Args:
+            event_id: Unique event identifier
+
+        Returns:
+            True if this is a replay attack
+        """
+        if event_id in self.processed_events:
+            return True
+
+        self.processed_events.add(event_id)
+
+        # Maintain size limit
+        if len(self.processed_events) > self.max_processed_events:
+            # Remove oldest event (simple FIFO)
+            oldest = next(iter(self.processed_events))
+            self.processed_events.remove(oldest)
+
+        return False
+
+    def validate_webhook_event(self, event: WebhookEvent, signature: Optional[str] = None) -> WebhookValidationResult:
+        """
+        Validate complete webhook event.
+
+        Args:
+            event: Webhook event data
+            signature: Override signature (if not in event)
+
+        Returns:
+            Validation result
+        """
+        try:
+            # Check for replay attack
+            if event.id and self.is_replay_attack(event.id):
+                return WebhookValidationResult(
+                    is_valid=False,
+                    error="Event ID already processed (potential replay attack)",
+                    is_replay=True,
+                )
+
+            # Get signature
+            webhook_signature = signature or event.signature
+            if not webhook_signature:
+                return WebhookValidationResult(
+                    is_valid=False,
+                    error="Missing webhook signature",
+                )
+
+            # Prepare payload
+            payload = json.dumps(event.data, sort_keys=True) if not isinstance(event.data, str) else event.data
+
+            # Validate with or without timestamp
+            if event.timestamp is not None:
+                return self.validate_timestamped_webhook(payload, webhook_signature, event.timestamp)
+            else:
+                return self.validate_signature(payload, webhook_signature)
+
+        except Exception as e:
+            return WebhookValidationResult(
+                is_valid=False,
+                error=f"Webhook validation failed: {str(e)}",
+            )
+
+
+class WebhookHandler:
+    """
+    Handles incoming webhooks with validation and event processing.
+    """
+
+    def __init__(self, config: WebhookConfig):
+        """
+        Initialize webhook handler.
+
+        Args:
+            config: Webhook configuration
+        """
+        self.validator = WebhookValidator(config)
+        self.event_handlers: Dict[str, Callable[[WebhookEvent], None]] = {}
+
+    def on(self, event_type: str, handler: Callable[[WebhookEvent], None]) -> None:
+        """
+        Register event handler.
+
+        Args:
+            event_type: Event type to handle ('*' for all events)
+            handler: Handler function
+        """
+        self.event_handlers[event_type] = handler
+
+    async def handle_webhook(
+        self,
+        body: bytes,
+        headers: Dict[str, str],
+        signature_header: str = 'X-Hub-Signature-256'
+    ) -> Dict[str, Any]:
+        """
+        Handle incoming webhook request.
+
+        Args:
+            body: Raw request body
+            headers: Request headers
+            signature_header: Name of signature header
+
+        Returns:
+            Response data
+        """
+        try:
+            # Validate content type
+            content_type = headers.get('content-type', '')
+            if 'application/json' not in content_type:
+                return {
+                    'status_code': 400,
+                    'error': 'Invalid content type. Expected application/json',
+                }
+
+            # Check body size
+            if len(body) > self.validator.config.max_body_size:
+                return {
+                    'status_code': 413,
+                    'error': 'Payload too large',
+                }
+
+            # Get signature
+            signature = headers.get(signature_header)
+            if not signature:
+                return {
+                    'status_code': 401,
+                    'error': f'Missing signature header: {signature_header}',
+                }
+
+            # Parse webhook data
+            try:
+                webhook_data = json.loads(body.decode())
+            except json.JSONDecodeError as e:
+                return {
+                    'status_code': 400,
+                    'error': f'Invalid JSON: {str(e)}',
+                }
+
+            # Create webhook event
+            event = WebhookEvent(
+                id=webhook_data.get('id') or f"webhook_{int(time.time())}",
+                type=webhook_data.get('type') or webhook_data.get('event_type') or 'unknown',
+                data=webhook_data,
+                timestamp=webhook_data.get('timestamp'),
+                headers=headers,
+            )
+
+            # Validate webhook
+            validation = self.validator.validate_webhook_event(event, signature)
+
+            if not validation.is_valid:
+                logger.warning(f"Invalid webhook signature: {validation.error}")
+                return {
+                    'status_code': 401,
+                    'error': 'Invalid webhook signature',
+                    'details': validation.error,
+                }
+
+            # Process event
+            await self._process_event(event)
+
+            return {
+                'status_code': 200,
+                'event_id': event.id,
+                'processed': True,
+            }
+
+        except Exception as e:
+            logger.error(f"Webhook processing error: {str(e)}")
+            return {
+                'status_code': 500,
+                'error': 'Internal server error',
+                'details': str(e),
+            }
+
+    async def _process_event(self, event: WebhookEvent) -> None:
+        """
+        Process webhook event.
+
+        Args:
+            event: Webhook event to process
+        """
+        logger.info(f"Processing webhook event: {event.type} ({event.id})")
+
+        # Call general event handler
+        general_handler = self.event_handlers.get('*')
+        if general_handler:
+            try:
+                await general_handler(event)
+            except Exception as e:
+                logger.error(f"General event handler error for {event.type}: {str(e)}")
+
+        # Call type-specific handler
+        type_handler = self.event_handlers.get(event.type)
+        if type_handler:
+            try:
+                await type_handler(event)
+            except Exception as e:
+                logger.error(f"Event handler error for {event.type}: {str(e)}")
+                raise  # Re-raise to indicate processing failure
+        else:
+            logger.warning(f"No handler registered for event type: {event.type}")
+
+    def get_stats(self) -> Dict[str, Any]:
+        """
+        Get webhook processing statistics.
+
+        Returns:
+            Statistics dictionary
+        """
+        return {
+            'processed_events': len(self.validator.processed_events),
+            'registered_handlers': len(self.event_handlers),
+            'event_types': list(self.event_handlers.keys()),
+        }
+
+
+# Provider-specific webhook handlers
+class GitHubWebhookHandler(WebhookHandler):
+    """
+    GitHub webhook handler with GitHub-specific validation.
+    """
+
+    def __init__(self, secret: str):
+        super().__init__(WebhookConfig(
+            secret=secret,
+            tolerance=300,  # 5 minutes
+        ))
+
+        # Register GitHub event handlers
+        self.on('push', self._handle_push)
+        self.on('pull_request', self._handle_pull_request)
+        self.on('issues', self._handle_issues)
+
+    async def _handle_push(self, event: WebhookEvent) -> None:
+        """Handle GitHub push events."""
+        logger.info(f"GitHub push to {event.data.get('repository', {}).get('full_name')}")
+
+    async def _handle_pull_request(self, event: WebhookEvent) -> None:
+        """Handle GitHub pull request events."""
+        logger.info(f"GitHub PR {event.data.get('action')} on {event.data.get('repository', {}).get('full_name')}")
+
+    async def _handle_issues(self, event: WebhookEvent) -> None:
+        """Handle GitHub issues events."""
+        logger.info(f"GitHub issue {event.data.get('action')} on {event.data.get('repository', {}).get('full_name')}")
+
+
+class StripeWebhookHandler(WebhookHandler):
+    """
+    Stripe webhook handler with Stripe-specific validation.
+    """
+
+    def __init__(self, secret: str):
+        super().__init__(WebhookConfig(
+            secret=secret,
+            tolerance=300,  # 5 minutes
+        ))
+
+        # Register Stripe event handlers
+        self.on('payment_intent.succeeded', self._handle_payment_success)
+        self.on('payment_intent.payment_failed', self._handle_payment_failure)
+        self.on('customer.subscription.created', self._handle_subscription_created)
+
+    async def _handle_payment_success(self, event: WebhookEvent) -> None:
+        """Handle successful payment events."""
+        logger.info(f"Stripe payment succeeded: {event.data.get('id')}")
+
+    async def _handle_payment_failure(self, event: WebhookEvent) -> None:
+        """Handle failed payment events."""
+        logger.info(f"Stripe payment failed: {event.data.get('id')}")
+
+    async def _handle_subscription_created(self, event: WebhookEvent) -> None:
+        """Handle subscription creation events."""
+        logger.info(f"Stripe subscription created: {event.data.get('id')}")
+
+
+class SlackWebhookHandler(WebhookHandler):
+    """
+    Slack webhook handler with Slack-specific validation.
+    """
+
+    def __init__(self, signing_secret: str):
+        super().__init__(WebhookConfig(
+            secret=signing_secret,
+            tolerance=300,  # 5 minutes
+        ))
+
+        # Register Slack event handlers
+        self.on('app_mention', self._handle_app_mention)
+        self.on('message', self._handle_message)
+
+    async def _handle_app_mention(self, event: WebhookEvent) -> None:
+        """Handle Slack app mention events."""
+        logger.info(f"Slack app mention: {event.data.get('text', '')[:100]}...")
+
+    async def _handle_message(self, event: WebhookEvent) -> None:
+        """Handle Slack message events."""
+        logger.info(f"Slack message: {event.data.get('text', '')[:100]}...")
+
+
+# Flask/Django middleware-style decorator
+def webhook_validator(config: WebhookConfig):
+    """
+    Decorator for webhook validation middleware.
+
+    Usage:
+        @webhook_validator(WebhookConfig(secret="your-secret"))
+        def handle_webhook(request):
+            # Webhook is already validated
+            pass
+    """
+    def decorator(func: Callable) -> Callable:
+        async def wrapper(*args, **kwargs):
+            # Extract request data (implementation depends on framework)
+            # This is a generic wrapper - adapt for specific framework
+            return await func(*args, **kwargs)
+        return wrapper
+    return decorator
+
+
+# Utility functions
+def generate_webhook_signature(payload: str, secret: str) -> str:
+    """
+    Generate webhook signature for testing.
+
+    Args:
+        payload: Payload to sign
+        secret: Webhook secret
+
+    Returns:
+        Signature string
+    """
+    hmac_obj = hmac.new(secret.encode(), payload.encode(), hashlib.sha256)
+    return f"sha256={hmac_obj.hexdigest()}"
+
+
+def generate_timestamped_signature(payload: str, secret: str, timestamp: int) -> str:
+    """
+    Generate timestamped webhook signature.
+
+    Args:
+        payload: Payload to sign
+        secret: Webhook secret
+        timestamp: Timestamp
+
+    Returns:
+        Signature string
+    """
+    timestamped_payload = f"{timestamp}.{payload}"
+    hmac_obj = hmac.new(secret.encode(), timestamped_payload.encode(), hashlib.sha256)
+    return f"sha256={hmac_obj.hexdigest()}"
+
+
+# Common webhook provider configurations
+WEBHOOK_PROVIDERS = {
+    'github': WebhookConfig(
+        secret='',  # Set at runtime
+        tolerance=300,
+        algorithm='sha256',
+    ),
+    'gitlab': WebhookConfig(
+        secret='',
+        tolerance=300,
+        algorithm='sha256',
+    ),
+    'stripe': WebhookConfig(
+        secret='',
+        tolerance=300,
+        algorithm='sha256',
+    ),
+    'slack': WebhookConfig(
+        secret='',
+        tolerance=300,
+        algorithm='sha256',
+    ),
+    'twilio': WebhookConfig(
+        secret='',
+        tolerance=300,
+        algorithm='sha1',
+    ),
+}
+
+
+def create_provider_handler(provider: str, secret: str) -> WebhookHandler:
+    """
+    Create webhook handler for common providers.
+
+    Args:
+        provider: Provider name ('github', 'stripe', etc.)
+        secret: Webhook secret
+
+    Returns:
+        Configured webhook handler
+    """
+    if provider == 'github':
+        return GitHubWebhookHandler(secret)
+    elif provider == 'stripe':
+        return StripeWebhookHandler(secret)
+    elif provider == 'slack':
+        return SlackWebhookHandler(secret)
+    else:
+        # Generic handler
+        return WebhookHandler(WebhookConfig(secret=secret))

@@ -1,0 +1,650 @@
+# Deployment Guide
+
+This guide covers deploying {{projectName}} to various environments and platforms.
+
+## Table of Contents
+
+- [Prerequisites](#prerequisites)
+- [Local Development](#local-development)
+- [Docker Deployment](#docker-deployment)
+- [Kubernetes Deployment](#kubernetes-deployment)
+- [Cloud Platforms](#cloud-platforms)
+- [Environment Configuration](#environment-configuration)
+- [Monitoring Setup](#monitoring-setup)
+- [Troubleshooting](#troubleshooting)
+
+## Prerequisites
+
+Before deploying, ensure you have:
+
+- Node.js 18+ and npm
+- Docker and Docker Compose
+- kubectl and Helm (for Kubernetes)
+- PostgreSQL database
+- Redis instance
+- SSL certificates (for production)
+
+## Local Development
+
+### Quick Start
+
+1. **Clone repository**
+   ```bash
+   git clone <repository-url>
+   cd {{projectName}}
+   ```
+
+2. **Install dependencies**
+   ```bash
+   npm install
+   ```
+
+3. **Configure environment**
+   ```bash
+   cp .env.example .env
+   # Edit .env with your local configuration
+   ```
+
+4. **Start services**
+   ```bash
+   docker-compose up -d
+   npm run dev
+   ```
+
+5. **Verify deployment**
+   ```bash
+   curl http://localhost:{{port}}/health
+   ```
+
+### Development with Hot Reload
+
+```bash
+# Terminal 1: Start dependencies
+docker-compose up postgres redis -d
+
+# Terminal 2: Start application
+npm run dev
+
+# Terminal 3: Run tests
+npm run test:watch
+```
+
+## Docker Deployment
+
+### Single Container
+
+1. **Build image**
+   ```bash
+   docker build -t {{projectName}}:latest .
+   ```
+
+2. **Run container**
+   ```bash
+   docker run -d \
+     --name {{projectName}} \
+     -p {{port}}:{{port}} \
+     --env-file .env \
+     --restart unless-stopped \
+     {{projectName}}:latest
+   ```
+
+3. **Verify**
+   ```bash
+   docker logs {{projectName}}
+   curl http://localhost:{{port}}/health
+   ```
+
+### Docker Compose
+
+```yaml
+version: '3.8'
+services:
+  {{projectName}}:
+    build: .
+    ports:
+      - "{{port}}:{{port}}"
+    env_file:
+      - .env
+    depends_on:
+      - postgres
+      - redis
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: {{projectName}}
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+
+volumes:
+  postgres_data:
+```
+
+### Multi-Stage Build
+
+The included Dockerfile uses multi-stage builds for optimized production images:
+
+```bash
+# Build optimized image
+docker build --target production -t {{projectName}}:prod .
+
+# Run production container
+docker run -d --env-file .env {{projectName}}:prod
+```
+
+## Kubernetes Deployment
+
+### Prerequisites
+
+- Kubernetes cluster (v1.19+)
+- kubectl configured
+- Helm 3.x
+- NGINX Ingress Controller
+- cert-manager (for SSL)
+
+### Quick Deploy with Helm
+
+1. **Add Helm repository** (if using external charts)
+   ```bash
+   helm repo add bitnami https://charts.bitnami.com/bitnami
+   helm repo update
+   ```
+
+2. **Install PostgreSQL and Redis**
+   ```bash
+   # Install PostgreSQL
+   helm install postgres bitnami/postgresql \
+     --set postgresqlDatabase={{projectName}} \
+     --set postgresqlUsername={{projectName}}
+
+   # Install Redis
+   helm install redis bitnami/redis
+   ```
+
+3. **Deploy application**
+   ```bash
+   # Install {{projectName}}
+   helm install {{projectName}} ./helm
+   ```
+
+4. **Verify deployment**
+   ```bash
+   kubectl get pods -l app.kubernetes.io/name={{projectName}}
+   kubectl get ingress -l app.kubernetes.io/name={{projectName}}
+   ```
+
+### Manual Deployment
+
+1. **Create namespace**
+   ```bash
+   kubectl create namespace {{projectName}}
+   ```
+
+2. **Apply configurations**
+   ```bash
+   kubectl apply -f helm/templates/
+   ```
+
+3. **Check rollout status**
+   ```bash
+   kubectl rollout status deployment/{{projectName}}
+   ```
+
+### Ingress Configuration
+
+The Helm chart includes NGINX Ingress configuration:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{projectName}}-ingress
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  tls:
+    - hosts:
+        - api.yourdomain.com
+      secretName: {{projectName}}-tls
+  rules:
+    - host: api.yourdomain.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{projectName}}
+                port:
+                  number: {{port}}
+```
+
+## Cloud Platforms
+
+### AWS
+
+#### ECS Fargate
+
+1. **Build and push Docker image**
+   ```bash
+   # Build for ARM64 (Fargate requirement)
+   docker build --platform linux/arm64 -t {{projectName}} .
+
+   # Push to ECR
+   aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin <account>.dkr.ecr.us-east-1.amazonaws.com
+   docker tag {{projectName}}:latest <account>.dkr.ecr.us-east-1.amazonaws.com/{{projectName}}:latest
+   docker push <account>.dkr.ecr.us-east-1.amazonaws.com/{{projectName}}:latest
+   ```
+
+2. **Create ECS Task Definition**
+   ```json
+   {
+     "family": "{{projectName}}",
+     "executionRoleArn": "arn:aws:iam::<account>:role/ecsTaskExecutionRole",
+     "taskRoleArn": "arn:aws:iam::<account>:role/{{projectName}}TaskRole",
+     "networkMode": "awsvpc",
+     "requiresCompatibilities": ["FARGATE"],
+     "cpu": "256",
+     "memory": "512",
+     "containerDefinitions": [{
+       "name": "{{projectName}}",
+       "image": "<account>.dkr.ecr.us-east-1.amazonaws.com/{{projectName}}:latest",
+       "portMappings": [{
+         "containerPort": {{port}},
+         "hostPort": {{port}}
+       }],
+       "environment": [
+         {"name": "NODE_ENV", "value": "production"}
+       ],
+       "secrets": [
+         {"name": "DATABASE_URL", "valueFrom": "/{{projectName}}/database-url"},
+         {"name": "JWT_SECRET", "valueFrom": "/{{projectName}}/jwt-secret"}
+       ],
+       "logConfiguration": {
+         "logDriver": "awslogs",
+         "options": {
+           "awslogs-group": "/ecs/{{projectName}}",
+           "awslogs-region": "us-east-1"
+         }
+       }
+     }]
+   }
+   ```
+
+3. **Create RDS PostgreSQL and ElastiCache Redis**
+   ```bash
+   # RDS PostgreSQL
+   aws rds create-db-instance \
+     --db-instance-identifier {{projectName}}-db \
+     --db-instance-class db.t3.micro \
+     --engine postgres \
+     --master-username {{projectName}} \
+     --master-user-password <password> \
+     --allocated-storage 20
+
+   # ElastiCache Redis
+   aws elasticache create-cache-cluster \
+     --cache-cluster-id {{projectName}}-redis \
+     --cache-node-type cache.t3.micro \
+     --engine redis \
+     --num-cache-nodes 1
+   ```
+
+#### EKS
+
+```bash
+# Create EKS cluster
+eksctl create cluster --name {{projectName}}-cluster --region us-east-1
+
+# Deploy with Helm
+helm install {{projectName}} ./helm
+```
+
+### Google Cloud
+
+#### Cloud Run
+
+```bash
+# Build and deploy
+gcloud builds submit --tag gcr.io/<project>/{{projectName}}
+gcloud run deploy {{projectName}} \
+  --image gcr.io/<project>/{{projectName}} \
+  --platform managed \
+  --port {{port}} \
+  --allow-unauthenticated \
+  --set-env-vars="NODE_ENV=production"
+```
+
+#### GKE
+
+```bash
+# Create GKE cluster
+gcloud container clusters create {{projectName}}-cluster \
+  --num-nodes=3 \
+  --zone us-central1-a
+
+# Get credentials
+gcloud container clusters get-credentials {{projectName}}-cluster
+
+# Deploy
+kubectl apply -f helm/templates/
+```
+
+### Azure
+
+#### Container Instances
+
+```bash
+# Create container instance
+az container create \
+  --resource-group <resource-group> \
+  --name {{projectName}} \
+  --image {{projectName}} \
+  --ports {{port}} \
+  --environment-variables NODE_ENV=production \
+  --secrets database-url=<secret-uri> jwt-secret=<secret-uri>
+```
+
+#### AKS
+
+```bash
+# Create AKS cluster
+az aks create --resource-group <rg> --name {{projectName}}-cluster --node-count 3
+
+# Get credentials
+az aks get-credentials --resource-group <rg> --name {{projectName}}-cluster
+
+# Deploy
+kubectl apply -f helm/templates/
+```
+
+## Environment Configuration
+
+### Development
+
+```bash
+# .env
+NODE_ENV=development
+PORT={{port}}
+DATABASE_URL=postgresql://postgres:password@localhost:5432/{{projectName}}
+REDIS_URL=redis://localhost:6379
+JWT_SECRET=dev-secret-key-change-in-production
+LOG_LEVEL=debug
+```
+
+### Production
+
+```bash
+# .env
+NODE_ENV=production
+PORT={{port}}
+DATABASE_URL=postgresql://user:password@host:5432/{{projectName}}
+REDIS_URL=redis://host:6379
+JWT_SECRET=<strong-secret-key>
+LOG_LEVEL=info
+API_BASE_URL=https://api.yourdomain.com
+SSL_CERT_PATH=/path/to/cert.pem
+SSL_KEY_PATH=/path/to/key.pem
+```
+
+### Secrets Management
+
+#### Kubernetes Secrets
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{projectName}}-secrets
+type: Opaque
+data:
+  database-url: <base64-encoded-url>
+  jwt-secret: <base64-encoded-secret>
+  api-key: <base64-encoded-key>
+```
+
+#### AWS Secrets Manager
+
+```bash
+# Store secrets
+aws secretsmanager create-secret \
+  --name {{projectName}}/database-url \
+  --secret-string "postgresql://..."
+
+# Access in application
+const secret = await awsClient.getSecretValue({
+  SecretId: '{{projectName}}/database-url'
+});
+```
+
+## Monitoring Setup
+
+### Prometheus Metrics
+
+1. **Deploy Prometheus**
+   ```bash
+   helm install prometheus prometheus-community/prometheus
+   ```
+
+2. **Configure ServiceMonitor**
+   ```yaml
+   apiVersion: monitoring.coreos.com/v1
+   kind: ServiceMonitor
+   metadata:
+     name: {{projectName}}
+   spec:
+     selector:
+       matchLabels:
+         app: {{projectName}}
+     endpoints:
+       - port: http
+         path: /metrics
+         interval: 30s
+   ```
+
+3. **Access metrics**
+   ```bash
+   kubectl port-forward svc/prometheus-server 9090:80
+   # Open http://localhost:9090
+   ```
+
+### Grafana Dashboards
+
+1. **Deploy Grafana**
+   ```bash
+   helm install grafana grafana/grafana
+   ```
+
+2. **Import dashboard**
+   ```bash
+   # From ops/grafana/provisioning/dashboards/
+   kubectl apply -f grafana-dashboard.yaml
+   ```
+
+3. **Access Grafana**
+   ```bash
+   kubectl port-forward svc/grafana 3000:80
+   # Default credentials: admin/admin
+   ```
+
+### Logging
+
+#### ELK Stack
+
+```bash
+# Deploy Elasticsearch
+helm install elasticsearch elastic/elasticsearch
+
+# Deploy Kibana
+helm install kibana elastic/kibana
+
+# Configure Fluentd
+kubectl apply -f ops/logging/fluentd-config.yaml
+```
+
+#### Cloud Logging
+
+```yaml
+# For GCP
+spec:
+  containers:
+  - name: {{projectName}}
+    env:
+    - name: NODE_ENV
+      value: production
+    - name: GCP_PROJECT_ID
+      value: your-project-id
+```
+
+## Troubleshooting
+
+### Common Issues
+
+#### Database Connection
+
+```bash
+# Test database connection
+psql $DATABASE_URL -c "SELECT 1"
+
+# Check connection pool
+kubectl exec -it <pod-name> -- npx prisma studio
+```
+
+#### Redis Connection
+
+```bash
+# Test Redis connection
+redis-cli -u $REDIS_URL ping
+```
+
+#### Health Check Failures
+
+```bash
+# Check application logs
+kubectl logs -f deployment/{{projectName}}
+
+# Check health endpoint manually
+curl -v http://localhost:{{port}}/health
+```
+
+### Performance Issues
+
+1. **High CPU Usage**
+   ```bash
+   # Check pod resource usage
+   kubectl top pods
+
+   # Adjust resource limits
+   kubectl edit deployment {{projectName}}
+   ```
+
+2. **Memory Leaks**
+   ```bash
+   # Enable heap dumps
+   kubectl exec -it <pod-name> -- kill -USR2 1
+
+   # Analyze with Chrome DevTools
+   # Memory tab -> Load heap snapshot
+   ```
+
+3. **Slow Database Queries**
+   ```bash
+   # Enable query logging
+   SET log_statement = 'all';
+
+   # Check slow queries
+   SELECT * FROM pg_stat_activity WHERE state = 'active';
+   ```
+
+### Networking Issues
+
+1. **Service Mesh (Istio)**
+   ```bash
+   # Check Istio configuration
+   istioctl proxy-config routes <pod-name>
+
+   # View service mesh traffic
+   kubectl logs -n istio-system deployment/istio-ingressgateway
+   ```
+
+2. **DNS Resolution**
+   ```bash
+   # Test DNS resolution
+   kubectl exec -it <pod-name> -- nslookup postgres
+
+   # Check CoreDNS
+   kubectl get pods -n kube-system -l k8s-app=kube-dns
+   ```
+
+### SSL/TLS Issues
+
+1. **Certificate Issues**
+   ```bash
+   # Check certificate validity
+   openssl s_client -connect yourdomain.com:443 -servername yourdomain.com
+
+   # Renew certificates
+   kubectl get certificate
+   kubectl describe certificate {{projectName}}-tls
+   ```
+
+2. **Mixed Content**
+   ```bash
+   # Force HTTPS redirect
+   # Update ingress annotations
+   nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+   ```
+
+### Backup and Recovery
+
+1. **Database Backup**
+   ```bash
+   # PostgreSQL backup
+   pg_dump $DATABASE_URL > backup.sql
+
+   # Restore
+   psql $DATABASE_URL < backup.sql
+   ```
+
+2. **Application Data**
+   ```bash
+   # Backup persistent volumes
+   kubectl get pv
+   kubectl describe pv <pv-name>
+   ```
+
+## Security Checklist
+
+- [ ] SSL/TLS certificates configured
+- [ ] Secrets stored securely (not in environment variables)
+- [ ] Network policies applied
+- [ ] RBAC configured
+- [ ] Security headers enabled
+- [ ] Input validation implemented
+- [ ] Rate limiting configured
+- [ ] Audit logging enabled
+- [ ] Regular security updates
+- [ ] Vulnerability scanning in CI/CD
+
+## Support
+
+For deployment issues:
+
+1. Check application logs: `kubectl logs -f deployment/{{projectName}}`
+2. Verify configuration: `kubectl describe configmap {{projectName}}`
+3. Test health endpoints: `curl http://localhost:{{port}}/health`
+4. Check Kubernetes events: `kubectl get events --sort-by=.metadata.creationTimestamp`
+
+## Additional Resources
+
+- [Kubernetes Documentation](https://kubernetes.io/docs/)
+- [Helm Documentation](https://helm.sh/docs/)
+- [Docker Best Practices](https://docs.docker.com/develop/dev-best-practices/)
+- [12-Factor App Methodology](https://12factor.net/)

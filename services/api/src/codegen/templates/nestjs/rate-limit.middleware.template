@@ -1,0 +1,53 @@
+import { Injectable, NestMiddleware, HttpException, HttpStatus } from '@nestjs/common';
+import { Request, Response, NextFunction } from 'express';
+import { LoggerService } from '../services/logger.service';
+
+@Injectable()
+export class RateLimitMiddleware implements NestMiddleware {
+  private readonly requests = new Map<string, { count: number; resetTime: number }>();
+  private readonly windowMs = 15 * 60 * 1000; // 15 minutes
+  private readonly maxRequests = 100; // requests per window
+
+  constructor(private readonly logger: LoggerService) {}
+
+  use(req: Request, res: Response, next: NextFunction) {
+    const clientId = req.ip || req.connection.remoteAddress || 'unknown';
+    const now = Date.now();
+    const windowStart = now - this.windowMs;
+
+    // Clean up old entries
+    for (const [key, data] of this.requests.entries()) {
+      if (data.resetTime < windowStart) {
+        this.requests.delete(key);
+      }
+    }
+
+    // Get or create client entry
+    const clientData = this.requests.get(clientId) || {
+      count: 0,
+      resetTime: now + this.windowMs
+    };
+
+    // Check if limit exceeded
+    if (clientData.count >= this.maxRequests) {
+      this.logger.warn(
+        \`Rate limit exceeded for client: \${clientId}\`,
+        'RateLimitMiddleware'
+      );
+      throw new HttpException('Too many requests', HttpStatus.TOO_MANY_REQUESTS);
+    }
+
+    // Increment counter
+    clientData.count++;
+    this.requests.set(clientId, clientData);
+
+    // Add rate limit headers
+    res.set({
+      'X-RateLimit-Limit': this.maxRequests.toString(),
+      'X-RateLimit-Remaining': (this.maxRequests - clientData.count).toString(),
+      'X-RateLimit-Reset': clientData.resetTime.toString(),
+    });
+
+    next();
+  }
+}

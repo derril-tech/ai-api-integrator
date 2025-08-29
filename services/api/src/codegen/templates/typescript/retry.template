@@ -1,0 +1,245 @@
+import { AxiosResponse } from 'axios';
+
+export interface RetryOptions {
+  maxRetries?: number;
+  baseDelay?: number;
+  maxDelay?: number;
+  backoffFactor?: number;
+  retryCondition?: (error: any, attempt: number) => boolean;
+  onRetry?: (error: any, attempt: number) => void;
+}
+
+export interface RetryState {
+  attempt: number;
+  lastError?: any;
+  startTime: number;
+}
+
+/**
+ * Retry utility with exponential backoff
+ */
+export class RetryHelper {
+  private static readonly DEFAULT_OPTIONS: Required<RetryOptions> = {
+    maxRetries: 3,
+    baseDelay: 1000,
+    maxDelay: 30000,
+    backoffFactor: 2,
+    retryCondition: (error, attempt) => {
+      // Retry on network errors and server errors
+      if (!error.response) return true; // Network error
+      const status = error.response.status;
+      return status >= 500 || status === 429 || status === 408;
+    },
+    onRetry: (error, attempt) => {
+      console.warn(`Retry attempt ${attempt} after error:`, error.message);
+    },
+  };
+
+  /**
+   * Execute a function with retry logic
+   */
+  static async withRetry<T>(
+    operation: () => Promise<T>,
+    options: RetryOptions = {}
+  ): Promise<T> {
+    const config = { ...this.DEFAULT_OPTIONS, ...options };
+    const state: RetryState = {
+      attempt: 0,
+      startTime: Date.now(),
+    };
+
+    while (state.attempt <= config.maxRetries) {
+      try {
+        const result = await operation();
+        return result;
+      } catch (error) {
+        state.lastError = error;
+        state.attempt++;
+
+        if (state.attempt > config.maxRetries) {
+          throw error;
+        }
+
+        if (!config.retryCondition(error, state.attempt)) {
+          throw error;
+        }
+
+        config.onRetry(error, state.attempt);
+
+        const delay = this.calculateDelay(config, state.attempt);
+        await this.sleep(delay);
+      }
+    }
+
+    throw state.lastError;
+  }
+
+  /**
+   * Calculate delay for exponential backoff with jitter
+   */
+  private static calculateDelay(config: Required<RetryOptions>, attempt: number): number {
+    const exponentialDelay = config.baseDelay * Math.pow(config.backoffFactor, attempt - 1);
+    const delay = Math.min(exponentialDelay, config.maxDelay);
+
+    // Add jitter to prevent thundering herd
+    const jitter = Math.random() * 0.1 * delay;
+    return delay + jitter;
+  }
+
+  /**
+   * Sleep for specified milliseconds
+   */
+  private static sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+}
+
+/**
+ * Circuit breaker pattern implementation
+ */
+export class CircuitBreaker {
+  private failures = 0;
+  private lastFailureTime = 0;
+  private state: 'CLOSED' | 'OPEN' | 'HALF_OPEN' = 'CLOSED';
+
+  constructor(
+    private readonly failureThreshold: number = 5,
+    private readonly recoveryTimeout: number = 60000,
+    private readonly monitoringPeriod: number = 60000
+  ) {}
+
+  async execute<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.state === 'OPEN') {
+      if (Date.now() - this.lastFailureTime > this.recoveryTimeout) {
+        this.state = 'HALF_OPEN';
+      } else {
+        throw new Error('Circuit breaker is OPEN');
+      }
+    }
+
+    try {
+      const result = await operation();
+      this.onSuccess();
+      return result;
+    } catch (error) {
+      this.onFailure();
+      throw error;
+    }
+  }
+
+  private onSuccess(): void {
+    this.failures = 0;
+    this.state = 'CLOSED';
+  }
+
+  private onFailure(): void {
+    this.failures++;
+    this.lastFailureTime = Date.now();
+
+    if (this.failures >= this.failureThreshold) {
+      this.state = 'OPEN';
+    }
+  }
+
+  getState(): string {
+    return this.state;
+  }
+
+  getFailureCount(): number {
+    return this.failures;
+  }
+}
+
+/**
+ * Rate limiter for API requests
+ */
+export class RateLimiter {
+  private requests: number[] = [];
+
+  constructor(
+    private readonly maxRequests: number,
+    private readonly windowMs: number
+  ) {}
+
+  async waitForSlot(): Promise<void> {
+    const now = Date.now();
+
+    // Remove old requests outside the window
+    this.requests = this.requests.filter(time => now - time < this.windowMs);
+
+    if (this.requests.length >= this.maxRequests) {
+      // Calculate wait time until oldest request expires
+      const oldestRequest = Math.min(...this.requests);
+      const waitTime = this.windowMs - (now - oldestRequest);
+
+      if (waitTime > 0) {
+        await this.sleep(waitTime);
+        return this.waitForSlot(); // Recursively check again
+      }
+    }
+
+    this.requests.push(now);
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  getRemainingRequests(): number {
+    const now = Date.now();
+    this.requests = this.requests.filter(time => now - time < this.windowMs);
+    return Math.max(0, this.maxRequests - this.requests.length);
+  }
+}
+
+/**
+ * Batch request helper for handling multiple requests efficiently
+ */
+export class BatchHelper {
+  static async batchProcess<T, R>(
+    items: T[],
+    processor: (item: T) => Promise<R>,
+    options: {
+      batchSize?: number;
+      concurrency?: number;
+      onProgress?: (completed: number, total: number) => void;
+    } = {}
+  ): Promise<R[]> {
+    const { batchSize = 10, concurrency = 3, onProgress } = options;
+    const results: R[] = [];
+
+    for (let i = 0; i < items.length; i += batchSize) {
+      const batch = items.slice(i, i + batchSize);
+
+      // Process batch with limited concurrency
+      const batchPromises = batch.map(processor);
+      const batchResults = await Promise.allSettled(batchPromises);
+
+      // Handle results
+      for (const result of batchResults) {
+        if (result.status === 'fulfilled') {
+          results.push(result.value);
+        } else {
+          console.error('Batch processing error:', result.reason);
+          // You might want to handle errors differently
+        }
+      }
+
+      // Report progress
+      if (onProgress) {
+        onProgress(Math.min(i + batchSize, items.length), items.length);
+      }
+
+      // Rate limiting between batches
+      if (i + batchSize < items.length) {
+        await this.sleep(100);
+      }
+    }
+
+    return results;
+  }
+
+  private static sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+}

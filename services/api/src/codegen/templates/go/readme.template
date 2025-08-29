@@ -1,0 +1,325 @@
+# {{entityName}} Go SDK
+
+[![Go Reference](https://pkg.go.dev/badge/github.com/{{entityName | lower}}/{{entityName | lower}}-go.svg)](https://pkg.go.dev/github.com/{{entityName | lower}}/{{entityName | lower}}-go)
+[![Go Report Card](https://goreportcard.com/badge/github.com/{{entityName | lower}}/{{entityName | lower}}-go)](https://goreportcard.com/report/github.com/{{entityName | lower}}/{{entityName | lower}}-go)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+A comprehensive, type-safe Go client for the {{entityName}} API with automatic retries, pagination support, and context handling.
+
+## Features
+
+- 🚀 **Type Safe**: Full type safety with Go structs and interfaces
+- 🔄 **Automatic Retries**: Configurable retry logic with exponential backoff
+- 📄 **Smart Pagination**: Support for cursor, offset, and page-based pagination
+- ⚡ **Rate Limiting**: Built-in rate limit handling and circuit breaker patterns
+- 🎯 **Context Support**: Full context.Context support for cancellation and timeouts
+- 🛡️ **Error Handling**: Comprehensive error types and handling
+- 📊 **Metrics**: Optional metrics collection and logging
+
+## Installation
+
+```bash
+go get github.com/{{entityName | lower}}/{{entityName | lower}}-go
+```
+
+## Quick Start
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+    "log"
+
+    "{{entityName | lower}} "{{entityName | lower}} \"github.com/{{entityName | lower}}/{{entityName | lower}}-go\""
+)
+
+func main() {
+    // Create client with API key
+    client, err := {{entityName | lower}}.NewClient("your-api-key", nil)
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    ctx := context.Background()
+
+    {% for endpoint in endpoints | selectattr('method', 'equalto', 'GET') | list | first %}
+    {% if endpoint %}
+    // Get {{ endpoint.path | replace('/', ' ') | title }}
+    item, err := client.Get{{ endpoint.path | replace('/', '') | title | replace('{', '') | replace('}', '') }}(ctx, "item-id")
+    if err != nil {
+        log.Fatal(err)
+    }
+    fmt.Printf("Item: %+v\n", item)
+    {% endif %}
+    {% endfor %}
+
+    {% for endpoint in endpoints | selectattr('method', 'equalto', 'GET') %}
+    {% if 'list' in endpoint.path or endpoint.path.endswith('s') %}
+    // List items with pagination
+    opts := &{{entityName | lower}}.ListOptions{
+        Limit: 50,
+    }
+
+    resp, err := client.List{{ endpoint.path | replace('/', '') | title | replace('{', '') | replace('}', '') }}(ctx, opts)
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    for _, item := range resp.Data {
+        fmt.Printf("Item: %+v\n", item)
+    }
+
+    // Handle pagination
+    if resp.Meta.HasMore {
+        // Fetch next page
+        nextOpts := &{{entityName | lower}}.ListOptions{
+            After: *resp.Meta.NextCursor,
+            Limit: 50,
+        }
+        nextResp, err := client.List{{ endpoint.path | replace('/', '') | title | replace('{', '') | replace('}', '') }}(ctx, nextOpts)
+        // ... handle next page
+    }
+    {% break %}
+    {% endif %}
+    {% endfor %}
+}
+```
+
+## Configuration
+
+```go
+package main
+
+import (
+    "time"
+
+    "{{entityName | lower}} \"github.com/{{entityName | lower}}/{{entityName | lower}}-go\""
+)
+
+func main() {
+    config := &{{entityName | lower}}.Config{
+        APIKey:       "your-api-key",
+        BaseURL:      "https://api.yourcompany.com/v1",
+        Timeout:      30 * time.Second,
+        RetryMax:     3,
+        RetryWaitMin: 1 * time.Second,
+        RetryWaitMax: 30 * time.Second,
+        UserAgent:    "MyApp/1.0.0",
+    }
+
+    client, err := {{entityName | lower}}.NewClient("", config)
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    // Use client...
+}
+```
+
+## Error Handling
+
+The SDK provides specific error types for different scenarios:
+
+```go
+package main
+
+import (
+    "context"
+    "errors"
+    "fmt"
+    "log"
+
+    "{{entityName | lower}} \"github.com/{{entityName | lower}}/{{entityName | lower}}-go\""
+)
+
+func main() {
+    client, err := {{entityName | lower}}.NewClient("your-api-key", nil)
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    ctx := context.Background()
+
+    item, err := client.GetItem(ctx, "nonexistent-id")
+    if err != nil {
+        var notFoundErr *{{entityName | lower}}.NotFoundError
+        var authErr *{{entityName | lower}}.AuthenticationError
+        var rateLimitErr *{{entityName | lower}}.RateLimitError
+
+        switch {
+        case errors.As(err, &notFoundErr):
+            fmt.Printf("Item not found: %s\n", notFoundErr.Message)
+        case errors.As(err, &authErr):
+            fmt.Printf("Authentication failed: %s\n", authErr.Message)
+        case errors.As(err, &rateLimitErr):
+            fmt.Printf("Rate limited: %s\n", rateLimitErr.Message)
+        default:
+            fmt.Printf("Other error: %v\n", err)
+        }
+        return
+    }
+
+    fmt.Printf("Item: %+v\n", item)
+}
+```
+
+## Pagination
+
+The SDK supports multiple pagination patterns:
+
+### Cursor-based Pagination (Recommended)
+
+```go
+opts := &{{entityName | lower}}.ListOptions{
+    After: "cursor123",
+    Limit: 50,
+}
+
+resp, err := client.ListItems(ctx, opts)
+if err != nil {
+    log.Fatal(err)
+}
+
+// Access pagination metadata
+fmt.Printf("Total items: %d\n", resp.Meta.Total)
+fmt.Printf("Has more: %t\n", resp.Meta.HasMore)
+
+if resp.Meta.HasMore {
+    // Get next page
+    nextOpts := &{{entityName | lower}}.ListOptions{
+        After: *resp.Meta.NextCursor,
+        Limit: 50,
+    }
+    // ... fetch next page
+}
+```
+
+### Offset-based Pagination
+
+```go
+opts := &{{entityName | lower}}.ListOptions{
+    Page:  2,
+    Limit: 50,
+}
+
+resp, err := client.ListItems(ctx, opts)
+if err != nil {
+    log.Fatal(err)
+}
+
+fmt.Printf("Page %d of %d\n", resp.Pagination.Page, resp.Pagination.TotalPages)
+```
+
+## Context and Cancellation
+
+All client methods accept a context for cancellation and timeouts:
+
+```go
+ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+defer cancel()
+
+// This will timeout after 10 seconds
+items, err := client.ListItems(ctx, nil)
+if err != nil {
+    if errors.Is(err, context.DeadlineExceeded) {
+        fmt.Println("Request timed out")
+    } else {
+        log.Fatal(err)
+    }
+}
+```
+
+## Rate Limiting
+
+The client automatically handles rate limiting:
+
+```go
+// The client will automatically retry on 429 responses
+// with appropriate backoff
+items, err := client.ListItems(ctx, nil)
+if err != nil {
+    var rateLimitErr *{{entityName | lower}}.RateLimitError
+    if errors.As(err, &rateLimitErr) {
+        fmt.Printf("Rate limited, retry after: %s\n", rateLimitErr.Message)
+    }
+}
+```
+
+## API Reference
+
+{% for endpoint in endpoints %}
+### {{ endpoint.method | upper }} {{ endpoint.path }}
+{% if endpoint.summary %}{{ endpoint.summary }}{% endif %}
+
+{% if endpoint.description %}{{ endpoint.description }}{% endif %}
+
+**Parameters:**
+{% if endpoint.parameters %}
+{% for param in endpoint.parameters %}
+- `{{ param.name }}` ({{ param.location }}): {{ param.description or 'No description' }}{% if not param.required %} (optional){% endif %}
+{% endfor %}
+{% endif %}
+
+**Request Body:**
+{% if endpoint.requestBody %}
+- Content-Type: `application/json`
+{% endif %}
+
+**Responses:**
+{% if endpoint.responses %}
+{% for status, response in endpoint.responses.items() %}
+- `{{ status }}`: {{ response.description }}
+{% endfor %}
+{% endif %}
+
+{% endfor %}
+
+## Development
+
+### Prerequisites
+
+- Go 1.19 or later
+
+### Setup
+
+```bash
+git clone https://github.com/{{entityName | lower}}/{{entityName | lower}}-go.git
+cd {{entityName | lower}}-go
+go mod download
+```
+
+### Testing
+
+```bash
+go test ./...
+```
+
+### Building
+
+```bash
+go build ./...
+```
+
+## Contributing
+
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## Support
+
+- 📖 [GoDoc](https://pkg.go.dev/github.com/{{entityName | lower}}/{{entityName | lower}}-go)
+- 🐛 [Issues](https://github.com/{{entityName | lower}}/{{entityName | lower}}-go/issues)
+- 💬 [Discussions](https://github.com/{{entityName | lower}}/{{entityName | lower}}-go/discussions)
+
+---
+
+Made with ❤️ by the {{entityName}} Team

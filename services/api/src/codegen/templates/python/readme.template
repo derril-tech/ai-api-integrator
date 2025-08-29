@@ -1,0 +1,248 @@
+# {{entityName}} Python SDK
+
+[![PyPI version](https://badge.fury.io/py/{{entityName | lower}}-python.svg)](https://badge.fury.io/py/{{entityName | lower}}-python)
+[![Python Versions](https://img.shields.io/pypi/pyversions/{{entityName | lower}}-python)](https://pypi.org/project/{{entityName | lower}}-python/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+A comprehensive Python SDK for interacting with the {{entityName}} API with built-in retry logic, pagination support, and type safety.
+
+## Features
+
+- 🚀 **Async First**: Built with `asyncio` and `aiohttp` for high performance
+- 🔄 **Automatic Retries**: Exponential backoff with configurable retry policies
+- 📄 **Smart Pagination**: Automatic handling of offset, cursor, and page-based pagination
+- 🛡️ **Type Safety**: Full type hints with Pydantic models
+- ⚡ **Rate Limiting**: Built-in rate limit handling and circuit breaker patterns
+- 🔧 **Flexible Configuration**: Easy to configure for different environments
+- 📊 **Monitoring**: Built-in metrics and logging support
+
+## Installation
+
+```bash
+pip install {{entityName | lower}}-python
+```
+
+Or with optional dependencies:
+
+```bash
+pip install {{entityName | lower}}-python[dev,docs]
+```
+
+## Quick Start
+
+```python
+import asyncio
+from {{entityName | lower}}_python import {{entityName}}Client
+
+async def main():
+    # Initialize client
+    async with {{entityName}}Client(api_key="your-api-key") as client:
+        # Make API calls
+        {% for endpoint in endpoints | selectattr('method', 'equalto', 'GET') | list | first %}
+        {% if endpoint %}
+        # Get {{ endpoint.path | replace('/', ' ') | title }}
+        response = await client.get_{{ endpoint.path | replace('/', '_') | replace('{', '') | replace('}', '') | replace('_', '') | lower }}(
+            # Add path parameters here
+        )
+        print(response)
+        {% endif %}
+        {% endfor %}
+
+        # List items with automatic pagination
+        {% for endpoint in endpoints | selectattr('method', 'equalto', 'GET') %}
+        {% if 'list' in endpoint.path or endpoint.path.endswith('s') %}
+        async for item in client.list_{{ endpoint.path | replace('/', '_') | replace('{', '') | replace('}', '') | replace('_', '') | lower }}():
+            print(item)
+        {% break %}
+        {% endif %}
+        {% endfor %}
+
+asyncio.run(main())
+```
+
+## Configuration
+
+```python
+from {{entityName | lower}}_python import {{entityName}}Client, {{entityName}}Config
+
+# Custom configuration
+config = {{entityName}}Config(
+    api_key="your-api-key",
+    base_url="https://api.yourcompany.com/v2",
+    timeout=30.0,
+    max_retries=3,
+)
+
+async with {{entityName}}Client(config=config) as client:
+    # Use client with custom config
+    pass
+```
+
+## Environment Variables
+
+You can configure the client using environment variables:
+
+```bash
+export {{entityName | upper}}_API_KEY="your-api-key"
+export {{entityName | upper}}_BASE_URL="https://api.yourcompany.com/v1"
+```
+
+## Error Handling
+
+The SDK provides comprehensive error handling:
+
+```python
+from {{entityName | lower}}_python import (
+    {{entityName}}Client,
+    {{entityName}}AuthError,
+    {{entityName}}RateLimitError,
+    {{entityName}}ValidationError,
+)
+
+async with {{entityName}}Client() as client:
+    try:
+        response = await client.some_api_call()
+    except {{entityName}}AuthError:
+        print("Authentication failed")
+    except {{entityName}}RateLimitError as e:
+        print(f"Rate limited, retry after: {e.retry_after}s")
+    except {{entityName}}ValidationError as e:
+        print(f"Validation errors: {e.validation_errors}")
+    except Exception as e:
+        print(f"Other error: {e}")
+```
+
+## Pagination
+
+The SDK automatically handles different pagination schemes:
+
+```python
+async with {{entityName}}Client() as client:
+    # Offset-based pagination (automatic)
+    async for item in client.list_items(limit=50):
+        print(item)
+
+    # Manual pagination control
+    response = await client.list_items(page=1, limit=20)
+    print(f"Page {response.page} of {response.total_pages}")
+    print(f"Total items: {response.total}")
+```
+
+## Retry Configuration
+
+Customize retry behavior:
+
+```python
+from {{entityName | lower}}_python import (
+    {{entityName}}Client,
+    create_exponential_backoff_config,
+)
+
+config = create_exponential_backoff_config(
+    max_attempts=5,
+    initial_delay=1.0,
+    max_delay=30.0,
+)
+
+async with {{entityName}}Client(config=config) as client:
+    # Client will retry failed requests with exponential backoff
+    response = await client.unreliable_api_call()
+```
+
+## Models
+
+All API responses are automatically parsed into typed models:
+
+```python
+from {{entityName | lower}}_python import {{entityName}}Client
+
+async with {{entityName}}Client() as client:
+    # Response is automatically parsed and validated
+    user = await client.get_user(user_id="123")
+    print(f"User: {user.name} ({user.email})")
+    print(f"Created: {user.created_at}")
+```
+
+## Logging
+
+Enable detailed logging:
+
+```python
+import logging
+
+logging.basicConfig(level=logging.DEBUG)
+
+# SDK will now log detailed information about requests and retries
+async with {{entityName}}Client() as client:
+    response = await client.some_call()
+```
+
+## API Reference
+
+{% for endpoint in endpoints %}
+### {{ endpoint.method | upper }} {{ endpoint.path }}
+{% if endpoint.summary %}{{ endpoint.summary }}{% endif %}
+
+{% if endpoint.description %}{{ endpoint.description }}{% endif %}
+
+**Parameters:**
+{% if endpoint.parameters %}
+{% for param in endpoint.parameters %}
+- `{{ param.name }}` ({{ param.location }}): {{ param.description or 'No description' }}{% if not param.required %} (optional){% endif %}
+{% endfor %}
+{% endif %}
+
+**Responses:**
+{% if endpoint.responses %}
+{% for status, response in endpoint.responses.items() %}
+- `{{ status }}`: {{ response.description }}
+{% endfor %}
+{% endif %}
+
+{% endfor %}
+
+## Development
+
+### Setup
+
+```bash
+git clone https://github.com/{{entityName | lower}}/{{entityName | lower}}-python.git
+cd {{entityName | lower}}-python
+pip install -e .[dev]
+```
+
+### Testing
+
+```bash
+pytest tests/
+```
+
+### Building Documentation
+
+```bash
+pip install -e .[docs]
+sphinx-build docs/ docs/_build/
+```
+
+## Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Add tests for new functionality
+5. Ensure all tests pass
+6. Submit a pull request
+
+## License
+
+MIT License - see [LICENSE](LICENSE) file for details.
+
+## Support
+
+- 📖 [Documentation](https://{{entityName | lower}}-python.readthedocs.io/)
+- 🐛 [Issue Tracker](https://github.com/{{entityName | lower}}/{{entityName | lower}}-python/issues)
+- 💬 [Discussions](https://github.com/{{entityName | lower}}/{{entityName | lower}}-python/discussions)
+
+---
+
+Made with ❤️ by the {{entityName}} Team

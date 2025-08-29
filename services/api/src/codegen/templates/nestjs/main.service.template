@@ -1,0 +1,25 @@
+import { Injectable, Logger } from '@nestjs/common';
+import { Create{{entityName}}Dto } from '../dtos/create-{{entityName}}.dto';
+
+@Injectable()
+export class {{entityName}}Service {
+  private readonly logger = new Logger({{entityName}}Service.name);
+
+  async findAll() {
+    this.logger.log('Finding all {{entityName}} items');
+    // TODO: Implement database query
+    return [];
+  }
+
+  async findOne(id: string) {
+    this.logger.log(\`Finding {{entityName}} item with ID: \${id}\`);
+    // TODO: Implement database query
+    return { id, name: 'Sample {{entityName}}' };
+  }
+
+  async create(createDto: Create{{entityName}}Dto) {
+    this.logger.log('Creating new {{entityName}} item', createDto);
+    // TODO: Implement database insertion
+    return { id: 'generated-id', ...createDto };
+  }
+}

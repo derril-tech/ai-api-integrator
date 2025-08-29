@@ -1,0 +1,409 @@
+// Webhook Handler with Signature Validation
+import { Request, Response } from 'express';
+import crypto from 'crypto';
+
+export interface WebhookConfig {
+  secret: string;
+  tolerance?: number; // Time tolerance in seconds for timestamp-based signatures
+  maxBodySize?: number; // Maximum body size in bytes
+}
+
+export interface WebhookEvent {
+  id: string;
+  type: string;
+  data: any;
+  timestamp?: number;
+  signature?: string;
+}
+
+export interface WebhookValidationResult {
+  isValid: boolean;
+  error?: string;
+  signature?: string;
+  expectedSignature?: string;
+  timestamp?: number;
+  isReplay?: boolean;
+}
+
+export class WebhookValidator {
+  private config: WebhookConfig;
+  private processedEvents: Set<string> = new Set();
+  private readonly maxProcessedEvents = 10000;
+
+  constructor(config: WebhookConfig) {
+    this.config = {
+      tolerance: 300, // 5 minutes default
+      maxBodySize: 1024 * 1024, // 1MB default
+      ...config,
+    };
+  }
+
+  /**
+   * Validate webhook signature using HMAC-SHA256
+   */
+  validateSignature(payload: string, signature: string): WebhookValidationResult {
+    try {
+      // Remove common prefixes
+      let cleanSignature = signature;
+      if (signature.startsWith('sha256=')) {
+        cleanSignature = signature.slice(7);
+      }
+
+      // Decode signature
+      const signatureBuffer = Buffer.from(cleanSignature, 'hex');
+
+      // Create expected signature
+      const hmac = crypto.createHmac('sha256', this.config.secret);
+      hmac.update(payload);
+      const expectedSignature = hmac.digest();
+
+      // Use timing-safe comparison
+      const isValid = crypto.timingSafeEqual(signatureBuffer, expectedSignature);
+
+      return {
+        isValid,
+        signature: cleanSignature,
+        expectedSignature: expectedSignature.toString('hex'),
+      };
+    } catch (error) {
+      return {
+        isValid: false,
+        error: `Signature validation failed: ${error.message}`,
+      };
+    }
+  }
+
+  /**
+   * Validate webhook with timestamp for replay attack protection
+   */
+  validateTimestampedWebhook(payload: string, signature: string, timestamp: number): WebhookValidationResult {
+    const now = Math.floor(Date.now() / 1000);
+    const tolerance = this.config.tolerance!;
+
+    // Check timestamp tolerance
+    if (Math.abs(now - timestamp) > tolerance) {
+      return {
+        isValid: false,
+        error: `Timestamp outside tolerance window (±${tolerance}s)`,
+        timestamp,
+        isReplay: true,
+      };
+    }
+
+    // Create payload with timestamp
+    const timestampedPayload = `${timestamp}.${payload}`;
+    const result = this.validateSignature(timestampedPayload, signature);
+
+    return {
+      ...result,
+      timestamp,
+    };
+  }
+
+  /**
+   * Check for replay attacks
+   */
+  isReplayAttack(eventId: string): boolean {
+    if (this.processedEvents.has(eventId)) {
+      return true;
+    }
+
+    this.processedEvents.add(eventId);
+
+    // Maintain size limit
+    if (this.processedEvents.size > this.maxProcessedEvents) {
+      const firstValue = this.processedEvents.values().next().value;
+      this.processedEvents.delete(firstValue);
+    }
+
+    return false;
+  }
+
+  /**
+   * Validate complete webhook event
+   */
+  validateWebhookEvent(event: WebhookEvent, signature?: string): WebhookValidationResult {
+    try {
+      // Check for replay attack
+      if (event.id && this.isReplayAttack(event.id)) {
+        return {
+          isValid: false,
+          error: 'Event ID already processed (potential replay attack)',
+          isReplay: true,
+        };
+      }
+
+      if (!signature) {
+        return {
+          isValid: false,
+          error: 'Missing webhook signature',
+        };
+      }
+
+      // Prepare payload
+      const payload = typeof event.data === 'string'
+        ? event.data
+        : JSON.stringify(event.data);
+
+      // Validate with or without timestamp
+      if (event.timestamp) {
+        return this.validateTimestampedWebhook(payload, signature, event.timestamp);
+      } else {
+        return this.validateSignature(payload, signature);
+      }
+    } catch (error) {
+      return {
+        isValid: false,
+        error: `Webhook validation failed: ${error.message}`,
+      };
+    }
+  }
+}
+
+export class WebhookHandler {
+  private validator: WebhookValidator;
+  private eventHandlers: Map<string, (event: WebhookEvent) => Promise<void>> = new Map();
+
+  constructor(config: WebhookConfig) {
+    this.validator = new WebhookValidator(config);
+  }
+
+  /**
+   * Register event handler
+   */
+  on(eventType: string, handler: (event: WebhookEvent) => Promise<void>): void {
+    this.eventHandlers.set(eventType, handler);
+  }
+
+  /**
+   * Handle incoming webhook
+   */
+  async handleWebhook(req: Request, res: Response): Promise<void> {
+    try {
+      // Validate content type
+      const contentType = req.headers['content-type'];
+      if (!contentType?.includes('application/json')) {
+        res.status(400).json({ error: 'Invalid content type. Expected application/json' });
+        return;
+      }
+
+      // Check body size
+      const bodySize = req.headers['content-length'];
+      if (bodySize && parseInt(bodySize) > (this.validator['config'].maxBodySize || 1024 * 1024)) {
+        res.status(413).json({ error: 'Payload too large' });
+        return;
+      }
+
+      // Get raw body for signature validation
+      const rawBody = (req as any).rawBody || JSON.stringify(req.body);
+
+      // Get signature from various possible headers
+      const signature = req.headers['x-hub-signature-256'] as string ||
+                       req.headers['x-signature'] as string ||
+                       req.headers['stripe-signature'] as string ||
+                       req.headers['x-webhook-signature'] as string;
+
+      if (!signature) {
+        res.status(401).json({ error: 'Missing webhook signature' });
+        return;
+      }
+
+      // Parse webhook event
+      const event: WebhookEvent = {
+        id: req.body.id || `webhook_${Date.now()}`,
+        type: req.body.type || req.body.event_type || 'unknown',
+        data: req.body,
+        timestamp: req.body.timestamp || Math.floor(Date.now() / 1000),
+      };
+
+      // Validate signature
+      const validation = this.validator.validateWebhookEvent(event, signature);
+
+      if (!validation.isValid) {
+        console.warn('Invalid webhook signature:', validation.error);
+        res.status(401).json({
+          error: 'Invalid webhook signature',
+          details: validation.error
+        });
+        return;
+      }
+
+      // Process event
+      await this.processEvent(event);
+
+      // Return success
+      res.status(200).json({
+        status: 'success',
+        eventId: event.id,
+        processed: true
+      });
+
+    } catch (error) {
+      console.error('Webhook processing error:', error);
+      res.status(500).json({
+        error: 'Internal server error',
+        details: error.message
+      });
+    }
+  }
+
+  /**
+   * Process webhook event
+   */
+  private async processEvent(event: WebhookEvent): Promise<void> {
+    console.log(`Processing webhook event: ${event.type} (${event.id})`);
+
+    // Call general event handler
+    const generalHandler = this.eventHandlers.get('*');
+    if (generalHandler) {
+      try {
+        await generalHandler(event);
+      } catch (error) {
+        console.error(`General event handler error for ${event.type}:`, error);
+      }
+    }
+
+    // Call type-specific handler
+    const typeHandler = this.eventHandlers.get(event.type);
+    if (typeHandler) {
+      try {
+        await typeHandler(event);
+      } catch (error) {
+        console.error(`Event handler error for ${event.type}:`, error);
+        throw error; // Re-throw to indicate processing failure
+      }
+    } else {
+      console.warn(`No handler registered for event type: ${event.type}`);
+    }
+  }
+
+  /**
+   * Get webhook statistics
+   */
+  getStats(): {
+    processedEvents: number;
+    registeredHandlers: number;
+    recentEvents: string[];
+  } {
+    return {
+      processedEvents: this.validator['processedEvents'].size,
+      registeredHandlers: this.eventHandlers.size,
+      recentEvents: Array.from(this.eventHandlers.keys()),
+    };
+  }
+}
+
+// Provider-specific webhook handlers
+export class GitHubWebhookHandler extends WebhookHandler {
+  constructor(secret: string) {
+    super({
+      secret,
+      tolerance: 300, // 5 minutes for GitHub
+    });
+
+    // Register GitHub-specific event handlers
+    this.on('push', this.handlePush);
+    this.on('pull_request', this.handlePullRequest);
+    this.on('issues', this.handleIssues);
+  }
+
+  private async handlePush(event: WebhookEvent): Promise<void> {
+    console.log('Handling GitHub push event:', event.data.repository?.full_name);
+    // Implement push event handling logic
+  }
+
+  private async handlePullRequest(event: WebhookEvent): Promise<void> {
+    console.log('Handling GitHub pull request event:', event.data.action);
+    // Implement pull request handling logic
+  }
+
+  private async handleIssues(event: WebhookEvent): Promise<void> {
+    console.log('Handling GitHub issues event:', event.data.action);
+    // Implement issues handling logic
+  }
+}
+
+export class StripeWebhookHandler extends WebhookHandler {
+  constructor(secret: string) {
+    super({
+      secret,
+      tolerance: 300, // 5 minutes for Stripe
+    });
+
+    // Register Stripe-specific event handlers
+    this.on('payment_intent.succeeded', this.handlePaymentIntentSucceeded);
+    this.on('payment_intent.payment_failed', this.handlePaymentIntentFailed);
+    this.on('customer.subscription.created', this.handleSubscriptionCreated);
+  }
+
+  private async handlePaymentIntentSucceeded(event: WebhookEvent): Promise<void> {
+    console.log('Handling Stripe payment success:', event.data.id);
+    // Implement payment success handling
+  }
+
+  private async handlePaymentIntentFailed(event: WebhookEvent): Promise<void> {
+    console.log('Handling Stripe payment failure:', event.data.id);
+    // Implement payment failure handling
+  }
+
+  private async handleSubscriptionCreated(event: WebhookEvent): Promise<void> {
+    console.log('Handling Stripe subscription created:', event.data.id);
+    // Implement subscription creation handling
+  }
+}
+
+export class SlackWebhookHandler extends WebhookHandler {
+  constructor(signingSecret: string) {
+    super({
+      secret: signingSecret,
+      tolerance: 300, // 5 minutes for Slack
+    });
+
+    // Register Slack-specific event handlers
+    this.on('app_mention', this.handleAppMention);
+    this.on('message', this.handleMessage);
+  }
+
+  private async handleAppMention(event: WebhookEvent): Promise<void> {
+    console.log('Handling Slack app mention:', event.data.text);
+    // Implement app mention handling
+  }
+
+  private async handleMessage(event: WebhookEvent): Promise<void> {
+    console.log('Handling Slack message:', event.data.text);
+    // Implement message handling
+  }
+}
+
+// Express middleware for webhook validation
+export function createWebhookMiddleware(handler: WebhookHandler) {
+  return async (req: Request, res: Response, next: any) => {
+    // Store raw body for signature validation
+    const chunks: Buffer[] = [];
+    const originalWrite = res.write;
+    const originalEnd = res.end;
+
+    req.on('data', (chunk) => {
+      chunks.push(chunk);
+    });
+
+    req.on('end', () => {
+      (req as any).rawBody = Buffer.concat(chunks);
+      next();
+    });
+  };
+}
+
+// Utility functions
+export function generateWebhookSignature(payload: string, secret: string): string {
+  const hmac = crypto.createHmac('sha256', secret);
+  hmac.update(payload);
+  return `sha256=${hmac.digest('hex')}`;
+}
+
+export function generateTimestampedSignature(payload: string, secret: string, timestamp: number): string {
+  const timestampedPayload = `${timestamp}.${payload}`;
+  const hmac = crypto.createHmac('sha256', secret);
+  hmac.update(timestampedPayload);
+  return `sha256=${hmac.digest('hex')}`;
+}

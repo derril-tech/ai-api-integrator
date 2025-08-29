@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ai-api-integrator
+  labels:
+    name: ai-api-integrator
+    environment: production
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ai-api-integrator-staging
+  labels:
+    name: ai-api-integrator-staging
+    environment: staging

@@ -1,0 +1,598 @@
+"""
+OAuth Helper for {{entityName}} API
+
+This module provides OAuth application provisioning, token management,
+and secrets storage integration with Vault.
+"""
+
+import asyncio
+import base64
+import hashlib
+import hmac
+import json
+import os
+import secrets
+import time
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
+from urllib.parse import urlencode, parse_qs
+
+import aiohttp
+import requests
+
+
+@dataclass
+class OAuthProvider:
+    """OAuth provider configuration."""
+    name: str
+    display_name: str
+    authorization_url: str
+    token_url: str
+    scopes: List[str]
+    client_id_required: bool = True
+    client_secret_required: bool = True
+    redirect_uri_required: bool = True
+    supports_pkce: bool = True
+    documentation_url: str = ""
+
+
+@dataclass
+class OAuthAppConfig:
+    """OAuth application configuration."""
+    provider: str
+    client_id: str
+    client_secret: str
+    redirect_uri: Optional[str] = None
+    scopes: Optional[List[str]] = None
+    additional_params: Optional[Dict[str, str]] = None
+
+
+@dataclass
+class OAuthTokens:
+    """OAuth token response."""
+    access_token: str
+    refresh_token: Optional[str] = None
+    token_type: str = "Bearer"
+    expires_at: Optional[float] = None
+    scope: Optional[str] = None
+    id_token: Optional[str] = None
+
+
+@dataclass
+class VaultConfig:
+    """Vault configuration."""
+    address: str
+    token: Optional[str] = None
+    role_id: Optional[str] = None
+    secret_id: Optional[str] = None
+    namespace: Optional[str] = None
+
+
+class OAuthProvisioningService:
+    """OAuth application provisioning service."""
+
+    # Supported OAuth providers
+    PROVIDERS = {
+        'github': OAuthProvider(
+            name='github',
+            display_name='GitHub',
+            authorization_url='https://github.com/login/oauth/authorize',
+            token_url='https://github.com/login/oauth/access_token',
+            scopes=['repo', 'user', 'read:org'],
+            documentation_url='https://docs.github.com/en/developers/apps/building-oauth-apps/authorizing-oauth-apps',
+        ),
+        'gitlab': OAuthProvider(
+            name='gitlab',
+            display_name='GitLab',
+            authorization_url='https://gitlab.com/oauth/authorize',
+            token_url='https://gitlab.com/oauth/token',
+            scopes=['api', 'read_user', 'read_repository'],
+            documentation_url='https://docs.gitlab.com/ee/api/oauth2.html',
+        ),
+        'google': OAuthProvider(
+            name='google',
+            display_name='Google',
+            authorization_url='https://accounts.google.com/o/oauth2/v2/auth',
+            token_url='https://oauth2.googleapis.com/token',
+            scopes=['https://www.googleapis.com/auth/userinfo.email', 'https://www.googleapis.com/auth/userinfo.profile'],
+            documentation_url='https://developers.google.com/identity/protocols/oauth2',
+        ),
+        'microsoft': OAuthProvider(
+            name='microsoft',
+            display_name='Microsoft',
+            authorization_url='https://login.microsoftonline.com/common/oauth2/v2.0/authorize',
+            token_url='https://login.microsoftonline.com/common/oauth2/v2.0/token',
+            scopes=['https://graph.microsoft.com/User.Read', 'https://graph.microsoft.com/Mail.Read'],
+            documentation_url='https://docs.microsoft.com/en-us/azure/active-directory/develop/v2-oauth2-auth-code-flow',
+        ),
+        'slack': OAuthProvider(
+            name='slack',
+            display_name='Slack',
+            authorization_url='https://slack.com/oauth/v2/authorize',
+            token_url='https://slack.com/api/oauth.v2.access',
+            scopes=['channels:read', 'chat:write', 'users:read'],
+            documentation_url='https://api.slack.com/docs/oauth',
+        ),
+    }
+
+    def __init__(self):
+        self.flow_states: Dict[str, Dict[str, Any]] = {}
+        self.provisioned_apps: Dict[str, Dict[str, Any]] = {}
+
+    def get_supported_providers(self) -> List[OAuthProvider]:
+        """Get all supported OAuth providers."""
+        return list(self.PROVIDERS.values())
+
+    def get_provider(self, provider_name: str) -> OAuthProvider:
+        """Get OAuth provider configuration."""
+        if provider_name not in self.PROVIDERS:
+            raise ValueError(f"Unsupported OAuth provider: {provider_name}")
+        return self.PROVIDERS[provider_name]
+
+    async def provision_oauth_app(
+        self,
+        project_id: str,
+        config: OAuthAppConfig
+    ) -> Dict[str, Any]:
+        """Provision an OAuth application."""
+        provider = self.get_provider(config.provider)
+
+        # Validate configuration
+        self._validate_oauth_config(config, provider)
+
+        # Generate app ID
+        app_id = f"oauth_{int(time.time())}_{secrets.token_hex(4)}"
+
+        # Store provisioned app (in real implementation, this would go to a database)
+        provisioned_app = {
+            'id': app_id,
+            'provider': config.provider,
+            'client_id': config.client_id,
+            'client_secret': config.client_secret,
+            'redirect_uri': config.redirect_uri,
+            'scopes': config.scopes or provider.scopes,
+            'created_at': time.time(),
+            'is_active': True,
+        }
+
+        self.provisioned_apps[app_id] = provisioned_app
+
+        return provisioned_app
+
+    def generate_authorization_url(
+        self,
+        app_id: str,
+        redirect_uri: Optional[str] = None,
+        scopes: Optional[List[str]] = None,
+        state: Optional[str] = None
+    ) -> tuple[str, str]:
+        """Generate OAuth authorization URL."""
+        if app_id not in self.provisioned_apps:
+            raise ValueError(f"OAuth app {app_id} not found")
+
+        app = self.provisioned_apps[app_id]
+        provider = self.get_provider(app['provider'])
+
+        # Generate state if not provided
+        final_state = state or secrets.token_hex(32)
+
+        # Store flow state
+        flow_state = {
+            'state': final_state,
+            'provider': app['provider'],
+            'redirect_uri': redirect_uri or app['redirect_uri'],
+            'scopes': scopes or app['scopes'],
+            'expires_at': time.time() + 600,  # 10 minutes
+        }
+
+        if provider.supports_pkce:
+            flow_state['code_verifier'] = self._generate_code_verifier()
+
+        self.flow_states[final_state] = flow_state
+
+        # Build authorization URL
+        params = {
+            'client_id': app['client_id'],
+            'redirect_uri': flow_state['redirect_uri'],
+            'scope': ' '.join(flow_state['scopes']),
+            'response_type': 'code',
+            'state': final_state,
+        }
+
+        # Add PKCE parameters if supported
+        if flow_state.get('code_verifier'):
+            code_challenge = self._generate_code_challenge(flow_state['code_verifier'])
+            params['code_challenge'] = code_challenge
+            params['code_challenge_method'] = 'S256'
+
+        query_string = urlencode(params)
+        authorization_url = f"{provider.authorization_url}?{query_string}"
+
+        return authorization_url, final_state
+
+    async def exchange_code_for_token(
+        self,
+        state: str,
+        code: str,
+        redirect_uri: Optional[str] = None
+    ) -> OAuthTokens:
+        """Exchange authorization code for access token."""
+        if state not in self.flow_states:
+            raise ValueError("Invalid or expired state parameter")
+
+        flow_state = self.flow_states[state]
+
+        # Check expiration
+        if time.time() > flow_state['expires_at']:
+            del self.flow_states[state]
+            raise ValueError("Authorization state has expired")
+
+        # Clean up used state
+        del self.flow_states[state]
+
+        # Get app configuration
+        provider = self.get_provider(flow_state['provider'])
+        app = None
+        for provisioned_app in self.provisioned_apps.values():
+            if (provisioned_app['provider'] == flow_state['provider'] and
+                provisioned_app['redirect_uri'] == flow_state['redirect_uri']):
+                app = provisioned_app
+                break
+
+        if not app:
+            raise ValueError("OAuth app configuration not found")
+
+        # Prepare token request
+        token_data = {
+            'client_id': app['client_id'],
+            'client_secret': app['client_secret'],
+            'code': code,
+            'grant_type': 'authorization_code',
+            'redirect_uri': redirect_uri or flow_state['redirect_uri'],
+        }
+
+        # Add PKCE verifier if used
+        if flow_state.get('code_verifier'):
+            token_data['code_verifier'] = flow_state['code_verifier']
+
+        # Make token request
+        async with aiohttp.ClientSession() as session:
+            async with session.post(provider.token_url, data=token_data) as response:
+                if not response.ok:
+                    error_text = await response.text()
+                    raise ValueError(f"Token exchange failed: {error_text}")
+
+                token_response = await response.json()
+
+        # Parse token response
+        tokens = OAuthTokens(
+            access_token=token_response['access_token'],
+            refresh_token=token_response.get('refresh_token'),
+            token_type=token_response.get('token_type', 'Bearer'),
+            scope=token_response.get('scope'),
+            id_token=token_response.get('id_token'),
+        )
+
+        # Calculate expiration time
+        if 'expires_in' in token_response:
+            tokens.expires_at = time.time() + token_response['expires_in']
+
+        return tokens
+
+    async def refresh_access_token(
+        self,
+        refresh_token: str,
+        app_id: str
+    ) -> OAuthTokens:
+        """Refresh an access token."""
+        if app_id not in self.provisioned_apps:
+            raise ValueError(f"OAuth app {app_id} not found")
+
+        app = self.provisioned_apps[app_id]
+        provider = self.get_provider(app['provider'])
+
+        refresh_data = {
+            'client_id': app['client_id'],
+            'client_secret': app['client_secret'],
+            'refresh_token': refresh_token,
+            'grant_type': 'refresh_token',
+        }
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(provider.token_url, data=refresh_data) as response:
+                if not response.ok:
+                    error_text = await response.text()
+                    raise ValueError(f"Token refresh failed: {error_text}")
+
+                token_response = await response.json()
+
+        tokens = OAuthTokens(
+            access_token=token_response['access_token'],
+            refresh_token=token_response.get('refresh_token', refresh_token),
+            token_type=token_response.get('token_type', 'Bearer'),
+            scope=token_response.get('scope'),
+        )
+
+        if 'expires_in' in token_response:
+            tokens.expires_at = time.time() + token_response['expires_in']
+
+        return tokens
+
+    def _validate_oauth_config(self, config: OAuthAppConfig, provider: OAuthProvider) -> None:
+        """Validate OAuth configuration."""
+        if provider.client_id_required and not config.client_id:
+            raise ValueError(f"{provider.display_name} requires a client ID")
+
+        if provider.client_secret_required and not config.client_secret:
+            raise ValueError(f"{provider.display_name} requires a client secret")
+
+        if provider.redirect_uri_required and not config.redirect_uri:
+            raise ValueError(f"{provider.display_name} requires a redirect URI")
+
+        # Validate scopes
+        if config.scopes:
+            invalid_scopes = [scope for scope in config.scopes if scope not in provider.scopes]
+            if invalid_scopes:
+                raise ValueError(f"Invalid scopes for {provider.display_name}: {invalid_scopes}")
+
+    def _generate_code_verifier(self) -> str:
+        """Generate PKCE code verifier."""
+        return base64.urlsafe_b64encode(secrets.token_bytes(32)).decode().rstrip('=')
+
+    def _generate_code_challenge(self, verifier: str) -> str:
+        """Generate PKCE code challenge."""
+        digest = hashlib.sha256(verifier.encode()).digest()
+        return base64.urlsafe_b64encode(digest).decode().rstrip('=')
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Get OAuth provisioning statistics."""
+        return {
+            'supported_providers': len(self.PROVIDERS),
+            'active_flows': len(self.flow_states),
+            'provisioned_apps': len(self.provisioned_apps),
+        }
+
+
+class VaultSecretsService:
+    """Vault secrets management service."""
+
+    def __init__(self, config: VaultConfig):
+        self.config = config
+        self.client = None  # Would be actual Vault client
+
+    async def initialize(self) -> None:
+        """Initialize Vault client."""
+        # TODO: Implement actual Vault client initialization
+        # This would use the hvac library or similar
+        pass
+
+    async def store_oauth_secrets(
+        self,
+        project_id: str,
+        provider: str,
+        secrets: Dict[str, Any]
+    ) -> str:
+        """Store OAuth secrets in Vault."""
+        path = f"projects/{project_id}/oauth/{provider}"
+
+        # TODO: Implement actual Vault write
+        # await self.client.write(path, secrets)
+
+        return path
+
+    async def get_oauth_secrets(
+        self,
+        project_id: str,
+        provider: str
+    ) -> Optional[Dict[str, Any]]:
+        """Retrieve OAuth secrets from Vault."""
+        path = f"projects/{project_id}/oauth/{provider}"
+
+        # TODO: Implement actual Vault read
+        # return await self.client.read(path)
+
+        return None
+
+    async def store_api_key(
+        self,
+        project_id: str,
+        api_name: str,
+        api_key: str,
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> str:
+        """Store API key in Vault."""
+        path = f"projects/{project_id}/api-keys/{api_name}"
+        secrets = {'api_key': api_key, **(metadata or {})}
+
+        # TODO: Implement actual Vault write
+        # await self.client.write(path, secrets)
+
+        return path
+
+    async def get_api_key(
+        self,
+        project_id: str,
+        api_name: str
+    ) -> Optional[str]:
+        """Retrieve API key from Vault."""
+        path = f"projects/{project_id}/api-keys/{api_name}"
+
+        # TODO: Implement actual Vault read
+        # response = await self.client.read(path)
+        # return response['data']['api_key'] if response else None
+
+        return None
+
+    async def get_health_status(self) -> Dict[str, Any]:
+        """Get Vault health status."""
+        # TODO: Implement actual health check
+        return {
+            'status': 'active',
+            'initialized': True,
+            'sealed': False,
+        }
+
+
+class OAuthHelper:
+    """Main OAuth helper class."""
+
+    def __init__(self, vault_config: VaultConfig):
+        self.provisioning_service = OAuthProvisioningService()
+        self.vault_service = VaultSecretsService(vault_config)
+        self.provisioned_apps: Dict[str, Dict[str, Any]] = {}
+
+    async def initialize(self) -> None:
+        """Initialize the OAuth helper."""
+        await self.vault_service.initialize()
+
+    async def provision_oauth_app(
+        self,
+        project_id: str,
+        config: OAuthAppConfig
+    ) -> Dict[str, Any]:
+        """Provision an OAuth application."""
+        app = await self.provisioning_service.provision_oauth_app(project_id, config)
+
+        # Store secrets in Vault
+        await self.vault_service.store_oauth_secrets(
+            project_id,
+            config.provider,
+            {
+                'client_id': config.client_id,
+                'client_secret': config.client_secret,
+                'redirect_uri': config.redirect_uri,
+                'scopes': ' '.join(config.scopes or []),
+            }
+        )
+
+        self.provisioned_apps[app['id']] = app
+        return app
+
+    def generate_authorization_url(
+        self,
+        app_id: str,
+        redirect_uri: Optional[str] = None,
+        scopes: Optional[List[str]] = None,
+        state: Optional[str] = None
+    ) -> tuple[str, str]:
+        """Generate OAuth authorization URL."""
+        return self.provisioning_service.generate_authorization_url(
+            app_id, redirect_uri, scopes, state
+        )
+
+    async def handle_callback(
+        self,
+        state: str,
+        code: str,
+        redirect_uri: Optional[str] = None
+    ) -> OAuthTokens:
+        """Handle OAuth callback and exchange code for tokens."""
+        return await self.provisioning_service.exchange_code_for_token(
+            state, code, redirect_uri
+        )
+
+    async def refresh_tokens(
+        self,
+        refresh_token: str,
+        provider: str
+    ) -> OAuthTokens:
+        """Refresh OAuth tokens."""
+        # Find app by provider
+        app_id = None
+        for app in self.provisioned_apps.values():
+            if app['provider'] == provider:
+                app_id = app['id']
+                break
+
+        if not app_id:
+            raise ValueError(f"No OAuth app found for provider: {provider}")
+
+        return await self.provisioning_service.refresh_access_token(refresh_token, app_id)
+
+    def get_supported_providers(self) -> List[OAuthProvider]:
+        """Get supported OAuth providers."""
+        return self.provisioning_service.get_supported_providers()
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Get OAuth helper statistics."""
+        provisioning_stats = self.provisioning_service.get_stats()
+
+        return {
+            **provisioning_stats,
+            'provisioned_apps_count': len(self.provisioned_apps),
+        }
+
+
+# Provider-specific OAuth helpers
+class GitHubOAuthHelper(OAuthHelper):
+    """GitHub-specific OAuth helper."""
+
+    def __init__(self, vault_config: VaultConfig, client_id: str, client_secret: str):
+        super().__init__(vault_config)
+        self.client_id = client_id
+        self.client_secret = client_secret
+
+    async def get_user_info(self, access_token: str) -> Dict[str, Any]:
+        """Get GitHub user information."""
+        headers = {
+            'Authorization': f'Bearer {access_token}',
+            'Accept': 'application/vnd.github.v3+json',
+        }
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get('https://api.github.com/user', headers=headers) as response:
+                if not response.ok:
+                    raise ValueError(f"GitHub API error: {response.status}")
+
+                return await response.json()
+
+
+class GoogleOAuthHelper(OAuthHelper):
+    """Google-specific OAuth helper."""
+
+    def __init__(self, vault_config: VaultConfig, client_id: str, client_secret: str):
+        super().__init__(vault_config)
+        self.client_id = client_id
+        self.client_secret = client_secret
+
+    async def get_user_info(self, access_token: str) -> Dict[str, Any]:
+        """Get Google user information."""
+        headers = {'Authorization': f'Bearer {access_token}'}
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get('https://www.googleapis.com/oauth2/v2/userinfo', headers=headers) as response:
+                if not response.ok:
+                    raise ValueError(f"Google API error: {response.status}")
+
+                return await response.json()
+
+
+# Utility functions
+def generate_secure_state() -> str:
+    """Generate a secure OAuth state parameter."""
+    return secrets.token_hex(32)
+
+
+def create_oauth_helper_for_provider(
+    provider: str,
+    vault_config: VaultConfig,
+    client_id: str,
+    client_secret: str
+) -> OAuthHelper:
+    """Create OAuth helper for specific provider."""
+    if provider == 'github':
+        return GitHubOAuthHelper(vault_config, client_id, client_secret)
+    elif provider == 'google':
+        return GoogleOAuthHelper(vault_config, client_id, client_secret)
+    else:
+        raise ValueError(f"Unsupported OAuth provider: {provider}")
+
+
+# Default Vault configuration
+DEFAULT_VAULT_CONFIG = VaultConfig(
+    address=os.getenv('VAULT_ADDR', 'http://localhost:8200'),
+    token=os.getenv('VAULT_TOKEN'),
+    role_id=os.getenv('VAULT_ROLE_ID'),
+    secret_id=os.getenv('VAULT_SECRET_ID'),
+    namespace=os.getenv('VAULT_NAMESPACE'),
+)

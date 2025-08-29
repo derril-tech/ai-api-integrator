@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "${projectName}.fullname" . }}
+  labels:
+    {{- include "${projectName}.labels" . | nindent 4 }}
+data:
+  NODE_ENV: "{{ .Values.config.environment }}"
+  PORT: "{{ .Values.service.port }}"
+  LOG_LEVEL: "{{ .Values.config.logLevel | default "info" }}"
+  API_BASE_URL: "{{ .Values.config.apiBaseUrl | default (printf "http://%s:%d" (include "${projectName}.fullname" .) .Values.service.port) }}"
+  {{- if .Values.postgres.enabled }}
+  DB_HOST: "{{ .Values.postgres.postgresqlHost }}"
+  DB_PORT: "{{ .Values.postgres.service.ports.postgresql }}"
+  DB_NAME: "{{ .Values.postgres.postgresqlDatabase }}"
+  {{- end }}
+  {{- if .Values.redis.enabled }}
+  REDIS_HOST: "{{ .Values.redis.host }}"
+  REDIS_PORT: "{{ .Values.redis.port }}"
+  {{- end }}
+  # Add more configuration as needed

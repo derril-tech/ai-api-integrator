@@ -1,0 +1,277 @@
+{
+  "dashboard": {
+    "id": null,
+    "title": "AI API Integrator - Overview",
+    "tags": ["ai-api-integrator", "overview"],
+    "style": "dark",
+    "timezone": "browser",
+    "refresh": "30s",
+    "schemaVersion": 27,
+    "version": 1,
+    "time": {
+      "from": "now-1h",
+      "to": "now"
+    },
+    "timepicker": {},
+    "templating": {
+      "list": [
+        {
+          "name": "environment",
+          "type": "query",
+          "query": "label_values(up{job=\"ai-api-integrator-api\"}, kubernetes_namespace)",
+          "refresh": 1,
+          "includeAll": false,
+          "multi": false,
+          "current": {
+            "value": "ai-api-integrator",
+            "text": "ai-api-integrator"
+          }
+        },
+        {
+          "name": "instance",
+          "type": "query",
+          "query": "label_values(up{job=\"ai-api-integrator-api\", kubernetes_namespace=\"$environment\"}, instance)",
+          "refresh": 1,
+          "includeAll": true,
+          "multi": true,
+          "current": {
+            "value": "$__all",
+            "text": "All"
+          }
+        }
+      ]
+    },
+    "panels": [
+      {
+        "id": 1,
+        "title": "Service Status",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "up{job=\"ai-api-integrator-api\", kubernetes_namespace=\"$environment\", instance=~\"$instance\"}",
+            "legendFormat": "{{instance}}"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "thresholds"
+            },
+            "thresholds": {
+              "steps": [
+                {"color": "red", "value": 0},
+                {"color": "green", "value": 1}
+              ]
+            },
+            "mappings": [
+              {"options": {"0": {"text": "Down"}}, "type": "value"},
+              {"options": {"1": {"text": "Up"}}, "type": "value"}
+            ]
+          }
+        },
+        "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0}
+      },
+      {
+        "id": 2,
+        "title": "Request Rate",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "sum(rate(http_requests_total{job=\"ai-api-integrator-api\", kubernetes_namespace=\"$environment\", instance=~\"$instance\"}[5m]))",
+            "legendFormat": "Requests/sec"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "reqps",
+            "color": {"mode": "palette-classic"}
+          }
+        },
+        "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0}
+      },
+      {
+        "id": 3,
+        "title": "Error Rate",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "sum(rate(http_requests_total{job=\"ai-api-integrator-api\", kubernetes_namespace=\"$environment\", instance=~\"$instance\", status=~\"5..\"}[5m])) / sum(rate(http_requests_total{job=\"ai-api-integrator-api\", kubernetes_namespace=\"$environment\", instance=~\"$instance\"}[5m]))",
+            "legendFormat": "Error Rate"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percentunit",
+            "color": {"mode": "thresholds"},
+            "thresholds": {
+              "steps": [
+                {"color": "green", "value": 0},
+                {"color": "yellow", "value": 0.05},
+                {"color": "red", "value": 0.1}
+              ]
+            }
+          }
+        },
+        "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0}
+      },
+      {
+        "id": 4,
+        "title": "Response Time (95th percentile)",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job=\"ai-api-integrator-api\", kubernetes_namespace=\"$environment\", instance=~\"$instance\"}[5m])) by (le))",
+            "legendFormat": "95th percentile"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s",
+            "color": {"mode": "thresholds"},
+            "thresholds": {
+              "steps": [
+                {"color": "green", "value": 0},
+                {"color": "yellow", "value": 1},
+                {"color": "red", "value": 2}
+              ]
+            }
+          }
+        },
+        "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0}
+      },
+      {
+        "id": 5,
+        "title": "Request Rate Over Time",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "sum(rate(http_requests_total{job=\"ai-api-integrator-api\", kubernetes_namespace=\"$environment\", instance=~\"$instance\"}[5m])) by (status)",
+            "legendFormat": "{{status}}"
+          }
+        ],
+        "yAxes": [
+          {"label": "Requests/sec", "min": 0},
+          {"show": false}
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4}
+      },
+      {
+        "id": 6,
+        "title": "Response Time Distribution",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.50, sum(rate(http_request_duration_seconds_bucket{job=\"ai-api-integrator-api\", kubernetes_namespace=\"$environment\", instance=~\"$instance\"}[5m])) by (le))",
+            "legendFormat": "50th percentile"
+          },
+          {
+            "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job=\"ai-api-integrator-api\", kubernetes_namespace=\"$environment\", instance=~\"$instance\"}[5m])) by (le))",
+            "legendFormat": "95th percentile"
+          },
+          {
+            "expr": "histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket{job=\"ai-api-integrator-api\", kubernetes_namespace=\"$environment\", instance=~\"$instance\"}[5m])) by (le))",
+            "legendFormat": "99th percentile"
+          }
+        ],
+        "yAxes": [
+          {"label": "Response Time (s)", "min": 0},
+          {"show": false}
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4}
+      },
+      {
+        "id": 7,
+        "title": "Memory Usage",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "process_resident_memory_bytes{job=\"ai-api-integrator-api\", kubernetes_namespace=\"$environment\", instance=~\"$instance\"} / 1024 / 1024",
+            "legendFormat": "RSS Memory (MB) - {{instance}}"
+          },
+          {
+            "expr": "nodejs_heap_size_used_bytes{job=\"ai-api-integrator-api\", kubernetes_namespace=\"$environment\", instance=~\"$instance\"} / 1024 / 1024",
+            "legendFormat": "Heap Used (MB) - {{instance}}"
+          }
+        ],
+        "yAxes": [
+          {"label": "Memory (MB)", "min": 0},
+          {"show": false}
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12}
+      },
+      {
+        "id": 8,
+        "title": "CPU Usage",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(process_cpu_seconds_total{job=\"ai-api-integrator-api\", kubernetes_namespace=\"$environment\", instance=~\"$instance\"}[5m]) * 100",
+            "legendFormat": "CPU Usage (%) - {{instance}}"
+          }
+        ],
+        "yAxes": [
+          {"label": "CPU Usage (%)", "min": 0, "max": 100},
+          {"show": false}
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12}
+      },
+      {
+        "id": 9,
+        "title": "Database Connections",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "pg_stat_database_numbackends{job=\"postgres\"}",
+            "legendFormat": "Active Connections"
+          }
+        ],
+        "yAxes": [
+          {"label": "Connections", "min": 0},
+          {"show": false}
+        ],
+        "gridPos": {"h": 6, "w": 8, "x": 0, "y": 20}
+      },
+      {
+        "id": 10,
+        "title": "Redis Memory",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "redis_memory_used_bytes{job=\"redis\"} / 1024 / 1024",
+            "legendFormat": "Used Memory (MB)"
+          }
+        ],
+        "yAxes": [
+          {"label": "Memory (MB)", "min": 0},
+          {"show": false}
+        ],
+        "gridPos": {"h": 6, "w": 8, "x": 8, "y": 20}
+      },
+      {
+        "id": 11,
+        "title": "API Endpoints Performance",
+        "type": "table",
+        "targets": [
+          {
+            "expr": "sum(rate(http_requests_total{job=\"ai-api-integrator-api\", kubernetes_namespace=\"$environment\"}[5m])) by (endpoint)",
+            "format": "table",
+            "instant": true
+          }
+        ],
+        "transformations": [
+          {
+            "id": "organize",
+            "options": {
+              "excludeByName": {"Time": true},
+              "renameByName": {
+                "endpoint": "Endpoint",
+                "Value": "Requests/sec"
+              }
+            }
+          }
+        ],
+        "gridPos": {"h": 6, "w": 8, "x": 16, "y": 20}
+      }
+    ]
+  }
+}

@@ -1,0 +1,221 @@
+import { PaginationOptions, PaginationResponse } from './client';
+
+export interface OffsetPaginationOptions extends PaginationOptions {
+  page: number;
+  limit: number;
+}
+
+export interface CursorPaginationOptions extends PaginationOptions {
+  cursor?: string;
+  limit: number;
+}
+
+export interface LinkHeader {
+  first?: string;
+  prev?: string;
+  next?: string;
+  last?: string;
+}
+
+/**
+ * Pagination helper class for handling different pagination strategies
+ */
+export class PaginationHelper {
+  /**
+   * Create offset-based pagination parameters
+   */
+  static createOffsetPagination(page: number = 1, limit: number = 10): OffsetPaginationOptions {
+    return {
+      page: Math.max(1, page),
+      limit: Math.min(Math.max(1, limit), 100), // Max 100 items per page
+    };
+  }
+
+  /**
+   * Create cursor-based pagination parameters
+   */
+  static createCursorPagination(cursor?: string, limit: number = 10): CursorPaginationOptions {
+    return {
+      cursor,
+      limit: Math.min(Math.max(1, limit), 100),
+    };
+  }
+
+  /**
+   * Parse Link header from HTTP response
+   */
+  static parseLinkHeader(linkHeader: string): LinkHeader {
+    const links: LinkHeader = {};
+    const regex = /<([^>]+)>;\s*rel="([^"]+)"/g;
+    let match;
+
+    while ((match = regex.exec(linkHeader)) !== null) {
+      const [, url, rel] = match;
+      links[rel as keyof LinkHeader] = url;
+    }
+
+    return links;
+  }
+
+  /**
+   * Extract cursor from URL
+   */
+  static extractCursorFromUrl(url: string): string | undefined {
+    try {
+      const urlObj = new URL(url);
+      return urlObj.searchParams.get('cursor') || undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Calculate total pages from total count and limit
+   */
+  static calculateTotalPages(totalCount: number, limit: number): number {
+    return Math.ceil(totalCount / limit);
+  }
+
+  /**
+   * Check if there are more pages
+   */
+  static hasNextPage(currentPage: number, totalPages: number): boolean {
+    return currentPage < totalPages;
+  }
+
+  /**
+   * Check if there are previous pages
+   */
+  static hasPrevPage(currentPage: number): boolean {
+    return currentPage > 1;
+  }
+
+  /**
+   * Get page numbers for pagination UI
+   */
+  static getPageNumbers(currentPage: number, totalPages: number, maxVisible: number = 7): number[] {
+    if (totalPages <= maxVisible) {
+      return Array.from({ length: totalPages }, (_, i) => i + 1);
+    }
+
+    const half = Math.floor(maxVisible / 2);
+    let start = Math.max(1, currentPage - half);
+    let end = Math.min(totalPages, start + maxVisible - 1);
+
+    if (end - start + 1 < maxVisible) {
+      start = Math.max(1, end - maxVisible + 1);
+    }
+
+    return Array.from({ length: end - start + 1 }, (_, i) => start + i);
+  }
+}
+
+/**
+ * Iterator class for paginated API responses
+ */
+export class PaginatedIterator<T> {
+  private currentPage = 1;
+  private hasMore = true;
+  private nextCursor?: string;
+
+  constructor(
+    private fetchFunction: (options: PaginationOptions) => Promise<PaginationResponse<T>>,
+    private options: Omit<PaginationOptions, 'page' | 'cursor'> = {}
+  ) {}
+
+  /**
+   * Get next page of results
+   */
+  async next(): Promise<{ value: T[]; done: boolean }> {
+    if (!this.hasMore) {
+      return { value: [], done: true };
+    }
+
+    try {
+      const paginationOptions: PaginationOptions = {
+        ...this.options,
+        ...(this.nextCursor
+          ? { cursor: this.nextCursor }
+          : { page: this.currentPage }
+        ),
+      };
+
+      const response = await this.fetchFunction(paginationOptions);
+
+      this.hasMore = response.pagination.hasNext;
+      this.nextCursor = response.pagination.cursor;
+      this.currentPage++;
+
+      return {
+        value: response.data,
+        done: false,
+      };
+    } catch (error) {
+      this.hasMore = false;
+      throw error;
+    }
+  }
+
+  /**
+   * Iterate through all pages
+   */
+  async *all(): AsyncGenerator<T[], void, unknown> {
+    while (this.hasMore) {
+      const { value, done } = await this.next();
+      if (done) break;
+      yield value;
+    }
+  }
+
+  /**
+   * Reset iterator to start
+   */
+  reset(): void {
+    this.currentPage = 1;
+    this.hasMore = true;
+    this.nextCursor = undefined;
+  }
+}
+
+/**
+ * Auto-pagination helper that accumulates all results
+ */
+export class AutoPaginator<T> {
+  constructor(
+    private fetchFunction: (options: PaginationOptions) => Promise<PaginationResponse<T>>,
+    private options: PaginationOptions = {}
+  ) {}
+
+  /**
+   * Fetch all pages and return combined results
+   */
+  async all(): Promise<T[]> {
+    const iterator = new PaginatedIterator(this.fetchFunction, this.options);
+    const results: T[] = [];
+
+    for await (const page of iterator.all()) {
+      results.push(...page);
+    }
+
+    return results;
+  }
+
+  /**
+   * Fetch pages until a condition is met
+   */
+  async until(predicate: (item: T) => boolean): Promise<T[]> {
+    const iterator = new PaginatedIterator(this.fetchFunction, this.options);
+    const results: T[] = [];
+
+    for await (const page of iterator.all()) {
+      for (const item of page) {
+        results.push(item);
+        if (predicate(item)) {
+          return results;
+        }
+      }
+    }
+
+    return results;
+  }
+}

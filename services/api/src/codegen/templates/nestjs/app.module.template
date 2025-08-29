@@ -1,0 +1,24 @@
+import { Module, MiddlewareConsumer } from '@nestjs/common';
+import { ConfigModule } from '@nestjs/config';
+import { {{entityName}}Controller } from './controllers/{{entityName}}.controller';
+import { {{entityName}}Service } from './services/{{entityName}}.service';
+import { LoggerService } from './services/logger.service';
+import { CorsMiddleware } from './middlewares/cors.middleware';
+import { RateLimitMiddleware } from './middlewares/rate-limit.middleware';
+
+@Module({
+  imports: [
+    ConfigModule.forRoot({
+      isGlobal: true,
+    }),
+  ],
+  controllers: [{{entityName}}Controller],
+  providers: [{{entityName}}Service, LoggerService],
+})
+export class AppModule {
+  configure(consumer: MiddlewareConsumer) {
+    consumer
+      .apply(CorsMiddleware, RateLimitMiddleware)
+      .forRoutes('*');
+  }
+}
